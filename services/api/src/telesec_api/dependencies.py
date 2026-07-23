@@ -11,6 +11,7 @@ from telesec_api.enrollments.service import EnrollmentService
 from telesec_api.scans.service import ScanService
 from telesec_api.settings import Settings
 from telesec_api.storage import JsonStore
+from telesec_api.vulnerabilities.service import VulnerabilityService
 
 
 def get_settings(request: Request) -> Settings:
@@ -39,3 +40,7 @@ def get_discovery_service(request: Request) -> DiscoveryService:
 
 def get_scan_service(request: Request) -> ScanService:
     return request.app.state.scan_service
+
+
+def get_vulnerability_service(request: Request) -> VulnerabilityService:
+    return request.app.state.vulnerability_service

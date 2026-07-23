@@ -47,3 +47,25 @@ def test_heartbeat_writes_acknowledged_local_state(tmp_path: Path) -> None:
     assert public_state is not None
     assert public_state["dashboard_url"] == "https://telesec.example.com/network-agent"
     assert "credential" not in public_state
+
+
+def test_record_error_writes_private_and_public_status(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("telesec_agent.heartbeat.nmap_version", lambda: "7.99")
+    monkeypatch.setattr("telesec_agent.heartbeat.npcap_status", lambda: "available")
+    paths = AgentPaths(tmp_path)
+    storage = AgentStorage(paths)
+    storage.initialize()
+
+    HeartbeatSender(storage, paths.state, paths.public_status).record_error(
+        "Bootstrap file not found"
+    )
+
+    state = storage.read_json(paths.state)
+    public_state = storage.read_json(paths.public_status)
+    assert state is not None
+    assert public_state is not None
+    assert state["status"] == "degraded"
+    assert state["server_status"] == "error"
+    assert public_state["status"] == "degraded"
+    assert public_state["error"] == "Bootstrap file not found"
+    assert public_state["nmap_version"] == "7.99"

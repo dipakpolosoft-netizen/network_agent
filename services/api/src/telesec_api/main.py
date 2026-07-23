@@ -27,6 +27,7 @@ from telesec_api.scans.service import ScanService
 from telesec_api.settings import Settings
 from telesec_api.storage import JsonStore
 from telesec_api.time import utc_now
+from telesec_api.vulnerabilities.service import VulnerabilityService
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -48,6 +49,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         discovery_service,
         command_service,
     )
+    vulnerability_service = VulnerabilityService(
+        resolved_settings.runtime_data_dir / "vulnerability-cache",
+        api_key=resolved_settings.nvd_api_key,
+        cache_ttl_seconds=resolved_settings.nvd_cache_ttl_seconds,
+        timeout_seconds=resolved_settings.nvd_timeout_seconds,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -66,6 +73,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.command_service = command_service
     app.state.discovery_service = discovery_service
     app.state.scan_service = scan_service
+    app.state.vulnerability_service = vulnerability_service
     web_origins = [resolved_settings.web_origin]
     if resolved_settings.environment == "development":
         web_origins.extend(["http://localhost:3000", "http://127.0.0.1:3000"])

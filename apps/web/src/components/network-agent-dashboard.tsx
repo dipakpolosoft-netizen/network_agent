@@ -8,6 +8,7 @@ import {
   ChevronRight,
   Clipboard,
   Download,
+  ExternalLink,
   HardDrive,
   History,
   LoaderCircle,
@@ -34,6 +35,7 @@ import {
   Enrollment,
   HostResult,
   Scan,
+  VulnerabilityLookup,
   api,
 } from "@/lib/api";
 
@@ -261,7 +263,7 @@ export function NetworkAgentDashboard() {
 
       {addOpen && <EnrollmentModal enrollment={enrollment} busy={busy} onClose={() => { setAddOpen(false); setEnrollment(null); }} onCreate={async (label, site) => { setBusy(true); try { setEnrollment(await api.createEnrollment(label, site)); await load(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Token could not be created"); } finally { setBusy(false); } }} />}
       {authorizeOpen && <AuthorizationModal agent={selectedAgent} busy={busy} onClose={() => setAuthorizeOpen(false)} onConfirm={() => void startDiscovery()} />}
-      {detail && <DeviceDrawer device={detail} result={resultByDevice.get(detail.device_id)} onClose={() => setDetail(null)} />}
+      {detail && <DeviceDrawer key={detail.device_id} device={detail} result={resultByDevice.get(detail.device_id)} scanId={scan?.scan_id} onClose={() => setDetail(null)} />}
     </div>
   );
 }
@@ -269,7 +271,7 @@ export function NetworkAgentDashboard() {
 function Metric({ icon, label, value, tone }: { icon: ReactNode; label: string; value: string; tone: string }) { return <div className="metric"><span className={`metric-icon ${tone}`}>{icon}</span><div><span>{label}</span><strong>{value}</strong></div></div>; }
 function PanelHeader({ title, subtitle, action }: { title: string; subtitle: string; action: ReactNode }) { return <div className="panel-header"><div><h2>{title}</h2><p>{subtitle}</p></div>{action}</div>; }
 function EmptyRow({ columns, label }: { columns: number; label: string }) { return <tr><td className="empty-row" colSpan={columns}>{label}</td></tr>; }
-function Status({ value, label }: { value: string; label?: string }) { const tone = ["online", "completed", "up"].includes(value) ? "success" : ["busy", "running", "queued"].includes(value) ? "warning" : ["failed", "offline", "cancelled", "timed_out"].includes(value) ? "danger" : "neutral"; return <span className={`status ${tone}`}><span />{label ?? titleCase(value)}</span>; }
+function Status({ value, label }: { value: string; label?: string }) { const tone = ["online", "completed", "up", "open"].includes(value) ? "success" : ["busy", "running", "queued", "medium"].includes(value) ? "warning" : ["failed", "offline", "cancelled", "timed_out", "critical", "high"].includes(value) ? "danger" : "neutral"; return <span className={`status ${tone}`}><span />{label ?? titleCase(value)}</span>; }
 function ProgressStat({ label, value }: { label: string; value: number }) { return <div><span>{label}</span><strong>{value}</strong></div>; }
 function HealthLine({ label, value }: { label: string; value: string }) { return <div className="health-line"><span>{label}</span><strong>{value}</strong></div>; }
 
@@ -281,4 +283,75 @@ function EnrollmentModal({ enrollment, busy, onClose, onCreate }: { enrollment: 
 
 function AuthorizationModal({ agent, busy, onClose, onConfirm }: { agent?: AgentRecord; busy: boolean; onClose: () => void; onConfirm: () => void }) { const [confirmed, setConfirmed] = useState(false); return <div className="modal-backdrop"><section className="modal compact" role="dialog" aria-modal="true"><div className="modal-header"><div><span className="eyebrow">DISCOVERY SCOPE</span><h2>Start network discovery</h2></div><button className="icon-button" title="Close" onClick={onClose}><X size={17} /></button></div><div className="scope-summary"><Server size={18} /><div><strong>{agent?.label}</strong><span>{agent?.subnet ?? "Agent-selected private /24"}</span></div></div><label className="confirmation"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>I confirm that this network is authorized for discovery.</span></label><button className="button primary full" disabled={!confirmed || busy} onClick={onConfirm}>{busy ? <LoaderCircle className="spin" size={15} /> : <Radar size={15} />}Start discovery</button></section></div>; }
 
-function DeviceDrawer({ device, result, onClose }: { device: Device; result?: HostResult; onClose: () => void }) { return <div className="drawer-backdrop" onClick={onClose}><aside className="drawer" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">DEVICE DETAILS</span><h2>{device.hostname ?? device.ip}</h2></div><button className="icon-button" title="Close" onClick={onClose}><X size={17} /></button></div><dl><dt>IP address</dt><dd>{device.ip}</dd><dt>MAC address</dt><dd>{device.mac ?? "Unavailable"}</dd><dt>Vendor</dt><dd>{device.vendor ?? "Unknown"}</dd><dt>Device type</dt><dd>{result?.device_type ? titleCase(result.device_type) : "Not classified"}</dd><dt>Operating system</dt><dd>{result?.os_matches[0]?.name ?? "Not detected"}</dd></dl><h3>Open ports and services</h3>{result?.ports.length ? <div className="port-list">{result.ports.map((port) => <div key={`${port.protocol}-${port.port}`}><code>{port.port}/{port.protocol}</code><span>{port.service ?? "unknown"}{port.product ? ` · ${port.product}` : ""}</span></div>)}</div> : <p className="muted">No detailed result for this device.</p>}<h3>Exposure observations</h3>{result?.exposure_flags.length ? <div className="finding-list">{result.exposure_flags.map((flag) => <div key={flag.code}><Status value={flag.severity} /><div><strong>{flag.title}</strong><span>{flag.evidence}</span></div></div>)}</div> : <p className="muted">No exposure observations reported.</p>}</aside></div>; }
+function DeviceDrawer({ device, result, scanId, onClose }: { device: Device; result?: HostResult; scanId?: string; onClose: () => void }) {
+  const [lookups, setLookups] = useState<Record<string, VulnerabilityLookup>>({});
+  const [selectedCpe, setSelectedCpe] = useState<string | null>(null);
+  const [loadingCpe, setLoadingCpe] = useState<string | null>(null);
+  const [lookupError, setLookupError] = useState<string | null>(null);
+  const cpeCount = new Set(result?.ports.map((port) => port.cpe).filter(Boolean)).size;
+  const selectedLookup = selectedCpe ? lookups[selectedCpe] : undefined;
+
+  async function checkVulnerabilities(cpe: string) {
+    setSelectedCpe(cpe);
+    setLookupError(null);
+    if (lookups[cpe] || !scanId) return;
+    setLoadingCpe(cpe);
+    try {
+      const lookup = await api.vulnerabilities(scanId, device.device_id, cpe);
+      setLookups((current) => ({ ...current, [cpe]: lookup }));
+    } catch (cause) {
+      setLookupError(cause instanceof Error ? cause.message : "CVE lookup failed");
+    } finally {
+      setLoadingCpe(null);
+    }
+  }
+
+  return <div className="drawer-backdrop" onClick={onClose}>
+    <aside className="drawer" onClick={(event) => event.stopPropagation()}>
+      <div className="modal-header"><div><span className="eyebrow">DEVICE DETAILS</span><h2>{device.hostname ?? device.ip}</h2></div><button className="icon-button" title="Close" onClick={onClose}><X size={17} /></button></div>
+      <div className="detail-summary"><Status value={result?.status ?? "not_scanned"} /><span>{result?.ports.length ?? 0} detected ports</span><span>{cpeCount} service fingerprints</span></div>
+      <dl>
+        <dt>IP address</dt><dd>{device.ip}</dd>
+        <dt>MAC address</dt><dd>{device.mac ?? "Unavailable"}</dd>
+        <dt>Vendor</dt><dd>{device.vendor ?? "Unknown"}</dd>
+        <dt>Device type</dt><dd>{result?.device_type ? `${titleCase(result.device_type)} (${Math.round((result.classification_confidence ?? 0) * 100)}% confidence)` : "Not classified"}</dd>
+        <dt>Latency</dt><dd>{device.latency_ms == null ? "Unavailable" : `${device.latency_ms.toFixed(2)} ms`}</dd>
+        <dt>Last seen</dt><dd>{new Date(device.last_seen).toLocaleString()}</dd>
+      </dl>
+
+      <h3>Operating system evidence</h3>
+      {result?.os_matches.length ? <div className="os-match-list">{result.os_matches.slice(0, 5).map((match) => <div key={`${match.name}-${match.accuracy}`}><span>{match.name}</span><strong>{match.accuracy}%</strong></div>)}</div> : <p className="muted">No operating system fingerprint was detected.</p>}
+
+      <h3>Open ports and services</h3>
+      {result?.ports.length ? <div className="port-list detailed">{result.ports.map((port) => <div className="service-row" key={`${port.protocol}-${port.port}`}>
+        <div className="service-heading"><code>{port.port}/{port.protocol}</code><Status value={port.state} /><strong>{port.service ?? "Unknown service"}</strong></div>
+        <div className="service-details"><span>Product</span><strong>{port.product ?? "Not identified"}</strong><span>Version</span><strong>{port.version ?? "Not identified"}</strong>{port.cpe && <><span>CPE</span><code>{port.cpe}</code></>}</div>
+        {port.cpe && scanId && <button className="button secondary cve-button" disabled={loadingCpe === port.cpe} onClick={() => void checkVulnerabilities(port.cpe!)}>{loadingCpe === port.cpe ? <LoaderCircle className="spin" size={14} /> : <ShieldAlert size={14} />}{lookups[port.cpe] ? "View CVEs" : "Check CVEs"}</button>}
+      </div>)}</div> : <p className="muted">No detailed port result is available for this device.</p>}
+
+      <h3>Exposure observations</h3>
+      {result?.exposure_flags.length ? <div className="finding-list">{result.exposure_flags.map((flag) => <div key={flag.code}><Status value={flag.severity} /><div><strong>{flag.title}</strong><span>{flag.evidence}</span></div></div>)}</div> : <p className="muted">No rule-based exposure observations were reported.</p>}
+
+      <div className="section-heading"><h3>Potential CVE matches</h3>{selectedLookup && <span>{selectedLookup.total} found</span>}</div>
+      {lookupError && <div className="inline-error"><ShieldAlert size={15} /><span>{lookupError}</span></div>}
+      {!selectedCpe && <p className="muted">{cpeCount ? "Use Check CVEs on a fingerprinted service to correlate its exact product version." : "A precise product version and CPE are required for CVE correlation."}</p>}
+      {selectedCpe && loadingCpe === selectedCpe && <div className="lookup-loading"><LoaderCircle className="spin" size={16} />Checking the NVD for this service fingerprint...</div>}
+      {selectedLookup && <VulnerabilityResults lookup={selectedLookup} />}
+      {result?.error && <div className="inline-error"><ShieldAlert size={15} /><span>{result.error}</span></div>}
+    </aside>
+  </div>;
+}
+
+function VulnerabilityResults({ lookup }: { lookup: VulnerabilityLookup }) {
+  return <div className="vulnerability-results">
+    <div className="lookup-context"><code>{lookup.cpe}</code><span>{lookup.notice}</span></div>
+    {lookup.vulnerabilities.length ? <div className="vulnerability-list">{lookup.vulnerabilities.map((vulnerability) => <article key={vulnerability.cve_id}>
+      <div className="vulnerability-heading"><a href={`https://nvd.nist.gov/vuln/detail/${vulnerability.cve_id}`} target="_blank" rel="noreferrer">{vulnerability.cve_id}<ExternalLink size={12} /></a><Status value={vulnerability.severity} />{vulnerability.cvss_score != null && <strong>CVSS {vulnerability.cvss_score.toFixed(1)}</strong>}{vulnerability.known_exploited && <span className="kev-badge">Known exploited</span>}</div>
+      <p>{vulnerability.description}</p>
+      {vulnerability.vector && <code className="cvss-vector">{vulnerability.vector}</code>}
+      {vulnerability.required_action && <div className="required-action"><strong>Required action</strong><span>{vulnerability.required_action}{vulnerability.action_due ? ` Due ${new Date(`${vulnerability.action_due}T00:00:00`).toLocaleDateString()}.` : ""}</span></div>}
+      {vulnerability.references.length > 0 && <div className="reference-links">{vulnerability.references.slice(0, 3).map((reference, index) => <a key={`${reference}-${index}`} href={reference} target="_blank" rel="noreferrer"><ExternalLink size={11} />Reference</a>)}</div>}
+    </article>)}</div> : <p className="muted result-empty">No NVD CVE matched this exact CPE version.</p>}
+    <p className="nvd-attribution">This product uses the NVD API but is not endorsed or certified by the NVD. Retrieved {new Date(lookup.retrieved_at).toLocaleString()}{lookup.cached ? " from cache" : ""}.</p>
+  </div>;
+}

@@ -10,6 +10,13 @@ from telesec_agent.config import AgentPaths, default_data_directory
 from telesec_agent.heartbeat import nmap_version, npcap_status
 
 
+def _is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def doctor(data_directory: Path | None = None) -> dict:
     paths = AgentPaths((data_directory or default_data_directory()).resolve())
     writable = False
@@ -29,8 +36,8 @@ def doctor(data_directory: Path | None = None) -> dict:
         else "attention",
         "data_directory": str(paths.root),
         "data_directory_writable": writable,
-        "bootstrap_present": paths.bootstrap.is_file(),
-        "identity_present": paths.identity.is_file(),
+        "bootstrap_present": _is_file(paths.bootstrap),
+        "identity_present": _is_file(paths.identity),
         "nmap_version": nmap,
         "npcap_status": npcap,
     }

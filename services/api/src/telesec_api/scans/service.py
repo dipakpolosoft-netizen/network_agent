@@ -223,6 +223,20 @@ class ScanService:
         records.sort(key=lambda item: item["created_at"], reverse=True)
         return records
 
+    def observed_cpes(self, scan_id: str, device_id: str) -> set[str]:
+        record = self.get(scan_id)
+        result = next(
+            (item for item in record["results"] if item["device_id"] == device_id),
+            None,
+        )
+        if result is None:
+            raise InvalidScanSelection("No completed result exists for this device")
+        return {
+            cpe
+            for port in result["ports"]
+            if isinstance((cpe := port.get("cpe")), str) and cpe
+        }
+
     def _owned(self, scan_id: str, agent_id: str) -> dict:
         record = self.get(scan_id)
         if record["agent_id"] != agent_id:

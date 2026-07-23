@@ -19,6 +19,19 @@ npm run dev -- --hostname 127.0.0.1 --port 3000
 
 Open `http://127.0.0.1:3000/network-agent`.
 
+Device CVE correlation uses the official NVD API only when an operator clicks
+`Check CVEs` for an observed service CPE. Results are cached for 24 hours. The
+public NVD allowance works for occasional local lookups; for repeated use, set an
+NVD API key before starting the API:
+
+```powershell
+$env:TELESEC_NVD_API_KEY = '<your-nvd-api-key>'
+```
+
+`TELESEC_NVD_CACHE_TTL_SECONDS` and `TELESEC_NVD_TIMEOUT_SECONDS` optionally
+control cache age and request timeout. CVE matches are version-based candidates,
+not proof that a vulnerability is exploitable on the scanned device.
+
 ## Local network access
 
 The recommended LAN layout exposes only the Next.js dashboard. Browser API requests
@@ -99,4 +112,10 @@ The installer supports interactive enrollment and silent deployment:
 .\Telesec-Network-Agent-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SERVERURL=https://telesec.example /ENROLLMENTTOKEN=<one-time-token>
 ```
 
-Existing DPAPI enrollment is retained during upgrades. Uninstall removes the service and program files but intentionally preserves `%ProgramData%\Telesec\NetworkAgent` for audit and recovery; remove that directory manually only as an explicit decommissioning action.
+Existing DPAPI enrollment is retained during upgrades. To force a fresh local enrollment during development or redeployment, pass `/RESETAGENTDATA=1` with a new one-time token:
+
+```powershell
+.\Telesec-Network-Agent-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RESETAGENTDATA=1 /SERVERURL=http://127.0.0.1:8000 /ENROLLMENTTOKEN=<one-time-token>
+```
+
+Uninstall removes the service, program files, Start Menu entry, Run key, and `%ProgramData%\Telesec\NetworkAgent`.

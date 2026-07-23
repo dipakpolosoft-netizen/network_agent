@@ -155,7 +155,7 @@ def test_selected_device_scan_progress_and_results(client: TestClient) -> None:
                     "service": "ssh",
                     "product": "OpenSSH",
                     "version": "9.0",
-                    "cpe": None,
+                    "cpe": "cpe:/a:openbsd:openssh:9.0",
                 }
             ],
             "os_matches": [{"name": "Linux", "accuracy": 95}],
@@ -165,6 +165,35 @@ def test_selected_device_scan_progress_and_results(client: TestClient) -> None:
     )
     assert result.status_code == 200
     assert len(result.json()["results"]) == 1
+
+    class FakeVulnerabilityService:
+        def lookup(self, cpe: str) -> dict:
+            assert cpe == "cpe:/a:openbsd:openssh:9.0"
+            return {
+                "source": "NVD",
+                "cpe": cpe,
+                "normalized_cpe": "cpe:2.3:a:openbsd:openssh:9.0:*:*:*:*:*:*:*",
+                "total": 0,
+                "returned": 0,
+                "retrieved_at": now,
+                "cached": False,
+                "vulnerabilities": [],
+                "notice": "Potential matches only.",
+            }
+
+    client.app.state.vulnerability_service = FakeVulnerabilityService()
+    lookup = client.get(
+        f"/api/scans/{scan['scan_id']}/devices/selected-device-0001/vulnerabilities",
+        params={"cpe": "cpe:/a:openbsd:openssh:9.0"},
+    )
+    assert lookup.status_code == 200
+    assert lookup.json()["normalized_cpe"].startswith("cpe:2.3:a:openbsd")
+
+    unobserved = client.get(
+        f"/api/scans/{scan['scan_id']}/devices/selected-device-0001/vulnerabilities",
+        params={"cpe": "cpe:/a:example:unobserved:1.0"},
+    )
+    assert unobserved.status_code == 422
 
     cancelled = client.post(f"/api/scans/{scan['scan_id']}/cancel")
     assert cancelled.status_code == 200

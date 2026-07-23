@@ -80,6 +80,33 @@ export type HostResult = {
   error: string | null;
 };
 
+export type VulnerabilityMatch = {
+  cve_id: string;
+  severity: "critical" | "high" | "medium" | "low" | "unknown";
+  cvss_score: number | null;
+  cvss_version: string | null;
+  vector: string | null;
+  description: string;
+  published_at: string | null;
+  last_modified_at: string | null;
+  known_exploited: boolean;
+  required_action: string | null;
+  action_due: string | null;
+  references: string[];
+};
+
+export type VulnerabilityLookup = {
+  source: "NVD";
+  cpe: string;
+  normalized_cpe: string;
+  total: number;
+  returned: number;
+  retrieved_at: string;
+  cached: boolean;
+  vulnerabilities: VulnerabilityMatch[];
+  notice: string;
+};
+
 export type Scan = {
   scan_id: string;
   command_id: string;
@@ -162,4 +189,9 @@ export const api = {
     }),
   cancelScan: (scanId: string) =>
     request<Scan>(`/api/scans/${scanId}/cancel`, { method: "POST" }),
+  vulnerabilities: (scanId: string, deviceId: string, cpe: string) =>
+    request<VulnerabilityLookup>(
+      `/api/scans/${scanId}/devices/${encodeURIComponent(deviceId)}`
+      + `/vulnerabilities?cpe=${encodeURIComponent(cpe)}`,
+    ),
 };

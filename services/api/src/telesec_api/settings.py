@@ -25,6 +25,9 @@ class Settings:
     max_scan_targets: int
     scan_concurrency: int
     allow_public_scopes: bool
+    nvd_api_key: str | None = None
+    nvd_cache_ttl_seconds: int = 86400
+    nvd_timeout_seconds: int = 20
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -53,4 +56,9 @@ class Settings:
             allow_public_scopes=_as_bool(
                 os.getenv("TELESEC_ALLOW_PUBLIC_SCOPES", "false")
             ),
+            nvd_api_key=os.getenv("TELESEC_NVD_API_KEY") or None,
+            nvd_cache_ttl_seconds=int(
+                os.getenv("TELESEC_NVD_CACHE_TTL_SECONDS", "86400")
+            ),
+            nvd_timeout_seconds=int(os.getenv("TELESEC_NVD_TIMEOUT_SECONDS", "20")),
         )

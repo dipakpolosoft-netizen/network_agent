@@ -4,6 +4,7 @@ import threading
 
 from telesec_agent import command_loop
 from telesec_agent.command_loop import AgentLoop
+from telesec_agent.config import ConfigurationError
 from telesec_agent.enrollment import AgentIdentity
 
 
@@ -45,4 +46,33 @@ def test_agent_reports_offline_when_loop_stops(monkeypatch):
     loop.run()
 
     assert statuses == ["online", "offline"]
+
+
+def test_agent_records_local_error_when_enrollment_fails(monkeypatch):
+    stop_event = threading.Event()
+    errors = []
+    waits = []
+
+    class Enrollment:
+        @staticmethod
+        def ensure_enrolled():
+            stop_event.set()
+            raise ConfigurationError("Bootstrap file not found")
+
+    class Heartbeat:
+        @staticmethod
+        def record_error(error):
+            errors.append(error)
+
+    def capture_wait(delay):
+        waits.append(delay)
+        return True
+
+    monkeypatch.setattr(stop_event, "wait", capture_wait)
+
+    loop = AgentLoop(Enrollment(), Heartbeat(), object(), stop_event)
+    loop.run()
+
+    assert errors == ["Bootstrap file not found"]
+    assert waits == [15]
 

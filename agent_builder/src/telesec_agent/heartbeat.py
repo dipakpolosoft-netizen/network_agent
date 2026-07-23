@@ -153,3 +153,35 @@ class HeartbeatSender:
                 },
             )
         return response
+
+    def record_error(
+        self,
+        error: str,
+        *,
+        current_command_id: str | None = None,
+    ) -> None:
+        occurred_at = timestamp()
+        message = error[:500]
+        self.storage.write_json(
+            self.state_path,
+            {
+                "status": "degraded",
+                "last_heartbeat_at": occurred_at,
+                "server_status": "error",
+                "current_command_id": current_command_id,
+                "error": message,
+            },
+        )
+        if self.public_state_path is not None:
+            self.storage.write_json(
+                self.public_state_path,
+                {
+                    "status": "degraded",
+                    "last_heartbeat_at": occurred_at,
+                    "heartbeat_interval_seconds": 30,
+                    "nmap_version": nmap_version(),
+                    "npcap_status": npcap_status(),
+                    "current_command_id": current_command_id,
+                    "error": message,
+                },
+            )

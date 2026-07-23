@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from telesec_api.dependencies import get_scan_service
+from telesec_api.dependencies import get_scan_service, get_vulnerability_service
 from telesec_api.scans.models import (
     ScanCreateRequest,
     ScanCreateResponse,
@@ -18,9 +18,18 @@ from telesec_api.scans.service import (
     ScanNotFound,
     ScanService,
 )
+from telesec_api.vulnerabilities.models import VulnerabilityLookup
+from telesec_api.vulnerabilities.service import (
+    InvalidCpe,
+    VulnerabilityProviderUnavailable,
+    VulnerabilityService,
+)
 
 router = APIRouter(tags=["scans"])
 ScanServiceDependency = Annotated[ScanService, Depends(get_scan_service)]
+VulnerabilityServiceDependency = Annotated[
+    VulnerabilityService, Depends(get_vulnerability_service)
+]
 
 
 @router.get("/api/scans", response_model=list[ScanPublic])
@@ -68,6 +77,29 @@ def get_scan(scan_id: UUID, service: ScanServiceDependency) -> ScanPublic:
         return ScanPublic.model_validate(service.get(str(scan_id)))
     except ScanNotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Scan not found") from exc
+
+
+@router.get(
+    "/api/scans/{scan_id}/devices/{device_id}/vulnerabilities",
+    response_model=VulnerabilityLookup,
+)
+def get_device_vulnerabilities(
+    scan_id: UUID,
+    device_id: str,
+    scan_service: ScanServiceDependency,
+    vulnerability_service: VulnerabilityServiceDependency,
+    cpe: Annotated[str, Query(min_length=8, max_length=1024)],
+) -> VulnerabilityLookup:
+    try:
+        if cpe not in scan_service.observed_cpes(str(scan_id), device_id):
+            raise InvalidScanSelection("CPE was not observed for this scanned device")
+        return VulnerabilityLookup.model_validate(vulnerability_service.lookup(cpe))
+    except ScanNotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Scan not found") from exc
+    except (InvalidScanSelection, InvalidCpe) as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    except VulnerabilityProviderUnavailable as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
 
 
 @router.post("/api/scans/{scan_id}/cancel", response_model=ScanPublic)

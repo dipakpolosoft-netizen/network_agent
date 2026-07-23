@@ -25,6 +25,9 @@ def settings(tmp_path: Path) -> Settings:
         max_scan_targets=10,
         scan_concurrency=3,
         allow_public_scopes=False,
+        nvd_api_key=None,
+        nvd_cache_ttl_seconds=86400,
+        nvd_timeout_seconds=5,
     )
 
 

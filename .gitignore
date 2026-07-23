@@ -5,6 +5,7 @@
 
 # Local process IDs, logs, and temporary validation files
 .tmp/
+*.log
 
 # Node.js
 node_modules/

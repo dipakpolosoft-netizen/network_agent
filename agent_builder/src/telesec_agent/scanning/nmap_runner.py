@@ -93,13 +93,13 @@ class NmapRunner:
         command = [executable, "-Pn", "-sS" if privileged else "-sT"]
         timeout_seconds = 15 * 60
         if profile == "standard":
-            command.extend(["--top-ports", "1000"])
+            command.extend(["--top-ports", "1000", "-sV", "--version-light"])
         elif profile == "full_tcp":
-            command.append("-p-")
+            command.extend(["-p-", "-sV", "--version-all"])
             timeout_seconds = 45 * 60
         else:
             raise NmapExecutionError(f"Unsupported scan profile: {profile}")
-        command.extend(["-sV", "--version-light", "--open"])
+        command.append("--open")
         if privileged:
             command.extend(["-O", "--osscan-limit"])
         command.extend(["--host-timeout", f"{timeout_seconds}s", "-oX", "-", ip])

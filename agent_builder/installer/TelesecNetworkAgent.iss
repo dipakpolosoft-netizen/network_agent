@@ -36,11 +36,14 @@ Source: "..\dist\agent\{#TrayExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dependencies\nmap-oem.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 #endif
 
+[Icons]
+Name: "{group}\Telesec Network Agent"; Filename: "{app}\{#TrayExe}"; WorkingDir: "{app}"; IconFilename: "{app}\{#TrayExe}"; Comment: "Show Telesec network agent status"
+
 [Run]
 #ifndef IncludeOemDependencies
 Filename: "https://nmap.org/download.html"; Description: "Install Nmap and Npcap for network discovery"; Flags: shellexec nowait postinstall skipifsilent; Check: ScannerDependenciesMissing
 #endif
-Filename: "{app}\{#AgentExe}"; Parameters: "service install"; StatusMsg: "Registering the Telesec service..."; Flags: runhidden waituntilterminated
+Filename: "{app}\{#AgentExe}"; Parameters: "service install"; StatusMsg: "Registering the Telesec service..."; Flags: runhidden waituntilterminated; BeforeInstall: PrepareAgentData
 Filename: "{app}\{#AgentExe}"; Parameters: "service start"; StatusMsg: "Connecting the Telesec agent..."; Flags: runhidden waituntilterminated
 Filename: "{app}\{#TrayExe}"; Description: "Show Telesec agent status in the notification area"; Flags: nowait postinstall skipifsilent
 
@@ -52,13 +55,27 @@ Filename: "{app}\{#TrayExe}"; Parameters: "--stop"; Flags: runhidden waituntilte
 Filename: "{app}\{#AgentExe}"; Parameters: "service stop"; Flags: runhidden waituntilterminated skipifdoesntexist; RunOnceId: "StopTelesecService"
 Filename: "{app}\{#AgentExe}"; Parameters: "service remove"; Flags: runhidden waituntilterminated skipifdoesntexist; RunOnceId: "RemoveTelesecService"
 
+[UninstallDelete]
+Type: filesandordirs; Name: "{commonappdata}\Telesec\NetworkAgent"
+Type: dirifempty; Name: "{commonappdata}\Telesec"
+Type: filesandordirs; Name: "{app}"
+Type: dirifempty; Name: "{autopf}\Telesec"
+
 [Code]
 var
   EnrollmentPage: TInputQueryWizardPage;
 
+function FreshEnrollmentRequested: Boolean;
+var
+  Value: String;
+begin
+  Value := Lowercase(Trim(ExpandConstant('{param:RESETAGENTDATA|0}')));
+  Result := (Value = '1') or (Value = 'true') or (Value = 'yes');
+end;
+
 function ExistingEnrollment: Boolean;
 begin
-  Result := FileExists(ExpandConstant('{commonappdata}\Telesec\NetworkAgent\identity\identity.json'));
+  Result := (not FreshEnrollmentRequested) and FileExists(ExpandConstant('{commonappdata}\Telesec\NetworkAgent\identity\identity.json'));
 end;
 
 function NpcapInstalled: Boolean;
@@ -148,6 +165,12 @@ begin
   end;
 end;
 
+procedure WriteBootstrap; forward;
+procedure ProtectAgentData; forward;
+procedure RemoveAgentData; forward;
+procedure PrepareAgentData; forward;
+procedure GrantPrivateDataAccess(RootDirectory: String); forward;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ExistingAgent: String;
@@ -196,6 +219,17 @@ begin
       ewWaitUntilTerminated,
       ResultCode
     );
+    if FreshEnrollmentRequested then
+    begin
+      Exec(
+        ExistingAgent,
+        'service remove',
+        '',
+        SW_HIDE,
+        ewWaitUntilTerminated,
+        ResultCode
+      );
+    end;
   end;
   Exec(
     ExpandConstant('{sys}\sc.exe'),
@@ -205,6 +239,17 @@ begin
     ewWaitUntilTerminated,
     ResultCode
   );
+  if FreshEnrollmentRequested then
+  begin
+    Exec(
+      ExpandConstant('{sys}\sc.exe'),
+      'delete {#ServiceName}',
+      '',
+      SW_HIDE,
+      ewWaitUntilTerminated,
+      ResultCode
+    );
+  end;
   Sleep(1000);
 end;
 
@@ -232,31 +277,11 @@ begin
 end;
 #endif
 
-procedure WriteBootstrap;
+procedure GrantPrivateDataAccess(RootDirectory: String);
 var
-  ConfigDirectory: String;
-  ConfigPath: String;
-  Document: String;
-begin
-  if ExistingEnrollment then
-    Exit;
-  ConfigDirectory := ExpandConstant('{commonappdata}\Telesec\NetworkAgent\config');
-  ConfigPath := ConfigDirectory + '\bootstrap.json';
-  ForceDirectories(ConfigDirectory);
-  Document := Format('{"server_url":"%s","enrollment_token":"%s"}', [JsonEscape(Trim(EnrollmentPage.Values[0])), JsonEscape(Trim(EnrollmentPage.Values[1]))]) + #13#10;
-  if not SaveStringToFile(ConfigPath, Document, False) then
-    RaiseException('Unable to write the Telesec bootstrap configuration.');
-end;
-
-procedure ProtectAgentData;
-var
-  RootDirectory: String;
-  PublicDirectory: String;
   ResultCode: Integer;
 begin
-  RootDirectory := ExpandConstant('{commonappdata}\Telesec\NetworkAgent');
-  PublicDirectory := RootDirectory + '\public';
-  ForceDirectories(PublicDirectory);
+  ForceDirectories(RootDirectory);
   Exec(
     ExpandConstant('{sys}\takeown.exe'),
     '/F "' + RootDirectory + '" /A /R /D Y',
@@ -269,14 +294,104 @@ begin
     RaiseException('Unable to take ownership of the Telesec data directory.');
   Exec(
     ExpandConstant('{sys}\icacls.exe'),
-    '"' + RootDirectory + '" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /T /C',
+    '"' + RootDirectory + '" /inheritance:r /grant:r "*S-1-5-18:F" "*S-1-5-32-544:F"',
     '',
     SW_HIDE,
     ewWaitUntilTerminated,
     ResultCode
   );
   if ResultCode <> 0 then
-    RaiseException('Unable to protect the Telesec agent data directory.');
+    RaiseException('Unable to grant direct access to the Telesec data directory.');
+  Exec(
+    ExpandConstant('{sys}\icacls.exe'),
+    '"' + RootDirectory + '" /grant "*S-1-5-18:F" "*S-1-5-32-544:F" /T /C',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  );
+  if ResultCode <> 0 then
+    RaiseException('Unable to grant file access to the Telesec data directory.');
+  Exec(
+    ExpandConstant('{sys}\icacls.exe'),
+    '"' + RootDirectory + '" /grant "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /T /C',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  );
+  if ResultCode <> 0 then
+    RaiseException('Unable to grant inherited access to the Telesec data directory.');
+end;
+
+procedure WriteBootstrap;
+var
+  ConfigDirectory: String;
+  ConfigPath: String;
+  RootDirectory: String;
+  ResultCode: Integer;
+  BootstrapParameters: String;
+begin
+  if ExistingEnrollment then
+  begin
+    Log('Telesec bootstrap unchanged because an existing enrollment is present.');
+    Exit;
+  end;
+  RootDirectory := ExpandConstant('{commonappdata}\Telesec\NetworkAgent');
+  ConfigDirectory := ExpandConstant('{commonappdata}\Telesec\NetworkAgent\config');
+  ConfigPath := ConfigDirectory + '\bootstrap.json';
+  Log('Writing Telesec bootstrap configuration to ' + ConfigPath);
+  ForceDirectories(ConfigDirectory);
+  GrantPrivateDataAccess(RootDirectory);
+  if FileExists(ConfigPath) and (not DeleteFile(ConfigPath)) then
+    RaiseException('Unable to replace the Telesec bootstrap configuration.');
+  BootstrapParameters := 'bootstrap --server-url "' + Trim(EnrollmentPage.Values[0]) + '" --enrollment-token "' + Trim(EnrollmentPage.Values[1]) + '"';
+  if not Exec(
+    ExpandConstant('{app}\{#AgentExe}'),
+    BootstrapParameters,
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  ) then
+    RaiseException('Unable to start the Telesec bootstrap writer.');
+  if ResultCode <> 0 then
+    RaiseException('Unable to write the Telesec bootstrap configuration.');
+  Log('Telesec bootstrap configuration written.');
+end;
+
+procedure RemoveAgentData;
+var
+  RootDirectory: String;
+begin
+  RootDirectory := ExpandConstant('{commonappdata}\Telesec\NetworkAgent');
+  if not DirExists(RootDirectory) then
+    Exit;
+  Log('Removing existing Telesec data directory for fresh enrollment.');
+  GrantPrivateDataAccess(RootDirectory);
+  if not DelTree(RootDirectory, True, True, True) then
+    RaiseException('Unable to remove the existing Telesec data directory.');
+  Log('Existing Telesec data directory removed.');
+end;
+
+procedure PrepareAgentData;
+begin
+  if FreshEnrollmentRequested then
+    RemoveAgentData;
+  WriteBootstrap;
+  ProtectAgentData;
+end;
+
+procedure ProtectAgentData;
+var
+  RootDirectory: String;
+  PublicDirectory: String;
+  ResultCode: Integer;
+begin
+  RootDirectory := ExpandConstant('{commonappdata}\Telesec\NetworkAgent');
+  PublicDirectory := RootDirectory + '\public';
+  ForceDirectories(PublicDirectory);
+  GrantPrivateDataAccess(RootDirectory);
   Exec(
     ExpandConstant('{sys}\icacls.exe'),
     '"' + RootDirectory + '" /remove:g "*S-1-5-32-545" /T /C',
@@ -316,7 +431,5 @@ begin
 #ifdef IncludeOemDependencies
     InstallScannerDependencies;
 #endif
-    WriteBootstrap;
-    ProtectAgentData;
   end;
 end;

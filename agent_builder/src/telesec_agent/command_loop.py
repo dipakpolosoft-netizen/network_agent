@@ -57,9 +57,11 @@ class AgentLoop:
                     delay = 3
             except (ApiClientError, ConfigurationError, OSError, ValueError) as exc:
                 LOGGER.warning("Agent cycle failed: %s", exc)
+                self.heartbeat.record_error(str(exc))
                 delay = 15
             except Exception:
                 LOGGER.exception("Agent command failed")
+                self.heartbeat.record_error("Unexpected agent command failure")
                 delay = 5
             self.stop_event.wait(delay)
         if identity is not None:

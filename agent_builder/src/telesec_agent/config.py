@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -11,6 +12,44 @@ from urllib.parse import urlsplit, urlunsplit
 
 class ConfigurationError(RuntimeError):
     pass
+
+
+def read_bootstrap_text(path: Path) -> str:
+    data = path.read_bytes()
+    for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be"):
+        try:
+            text = data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        if "\x00" not in text:
+            return text
+    return data.decode("utf-8-sig")
+
+
+def write_bootstrap_config(
+    path: Path,
+    *,
+    server_url: str,
+    enrollment_token: str,
+) -> None:
+    token = enrollment_token.strip()
+    if len(token) < 32:
+        raise ConfigurationError("Enrollment token is missing or invalid")
+    document = {
+        "server_url": validate_server_url(server_url),
+        "enrollment_token": token,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(document, separators=(",", ":")) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    BootstrapConfig.load(path)
 
 
 def default_data_directory() -> Path:
@@ -55,9 +94,17 @@ class BootstrapConfig:
         if not path.is_file():
             raise ConfigurationError(f"Bootstrap file not found: {path}")
         try:
-            document = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ConfigurationError("Bootstrap file is not valid JSON") from exc
+            document = json.loads(read_bootstrap_text(path))
+        except OSError as exc:
+            raise ConfigurationError(f"Bootstrap file cannot be read: {exc}") from exc
+        except UnicodeDecodeError as exc:
+            raise ConfigurationError(
+                f"Bootstrap file cannot be decoded: {exc}"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise ConfigurationError(
+                f"Bootstrap file is not valid JSON at byte {exc.pos}: {exc.msg}"
+            ) from exc
         token = str(document.get("enrollment_token", "")).strip()
         if len(token) < 32:
             raise ConfigurationError("Enrollment token is missing or invalid")
