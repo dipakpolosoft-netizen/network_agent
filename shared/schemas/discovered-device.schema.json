@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.telesec.local/v1/discovered-device.schema.json",
+  "title": "Telesec Discovered Device",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["device_id", "ip", "status", "discovery_reason", "is_agent", "first_seen", "last_seen"],
+  "properties": {
+    "device_id": { "type": "string", "minLength": 8, "maxLength": 128 },
+    "ip": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/ipv4" },
+    "hostname": { "type": ["string", "null"], "maxLength": 255 },
+    "mac": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/macAddress" },
+    "vendor": { "type": ["string", "null"], "maxLength": 255 },
+    "status": { "const": "up" },
+    "discovery_reason": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "latency_ms": { "type": ["number", "null"], "minimum": 0 },
+    "is_agent": { "type": "boolean" },
+    "first_seen": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" },
+    "last_seen": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" }
+  }
+}
+

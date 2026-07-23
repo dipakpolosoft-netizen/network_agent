@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "telesec-network-agent"
+version = "0.1.0"
+description = "Native Windows network agent for Telesec"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "psutil>=7.2,<8",
+    "pywin32>=311,<400; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4,<10",
+    "ruff>=0.15.22,<0.16",
+]
+build = [
+    "pyinstaller==6.21.0",
+]
+
+[project.scripts]
+telesec-agent = "telesec_agent.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/telesec_agent"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

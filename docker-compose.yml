@@ -1,0 +1,54 @@
+name: telesec
+
+services:
+  api:
+    build:
+      context: ./services/api
+    environment:
+      TELESEC_ENV: production
+      TELESEC_API_HOST: 0.0.0.0
+      TELESEC_API_PORT: 8000
+      TELESEC_RUNTIME_DATA_DIR: /var/lib/telesec
+      TELESEC_WEB_ORIGIN: ${TELESEC_WEB_ORIGIN:-http://127.0.0.1:3000}
+      TELESEC_ENROLLMENT_TTL_SECONDS: ${TELESEC_ENROLLMENT_TTL_SECONDS:-900}
+      TELESEC_HEARTBEAT_INTERVAL_SECONDS: ${TELESEC_HEARTBEAT_INTERVAL_SECONDS:-30}
+      TELESEC_AGENT_OFFLINE_AFTER_SECONDS: ${TELESEC_AGENT_OFFLINE_AFTER_SECONDS:-90}
+      TELESEC_COMMAND_TTL_SECONDS: ${TELESEC_COMMAND_TTL_SECONDS:-900}
+      TELESEC_MAX_SCAN_TARGETS: 10
+      TELESEC_SCAN_CONCURRENCY: 3
+      TELESEC_ALLOW_PUBLIC_SCOPES: "false"
+    ports:
+      - "127.0.0.1:${TELESEC_API_PORT:-8000}:8000"
+    volumes:
+      - telesec-runtime:/var/lib/telesec
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  web:
+    build:
+      context: ./apps/web
+      args:
+        TELESEC_API_PROXY_URL: ${TELESEC_API_PROXY_URL:-http://api:8000}
+    environment:
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
+    ports:
+      - "${TELESEC_BIND_ADDRESS:-127.0.0.1}:${TELESEC_WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3000/network-agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  telesec-runtime:

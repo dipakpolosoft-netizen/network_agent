@@ -1,0 +1,1 @@
+"""Windows credential protection support."""

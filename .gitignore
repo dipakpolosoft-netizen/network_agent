@@ -1,0 +1,46 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local process IDs, logs, and temporary validation files
+.tmp/
+
+# Node.js
+node_modules/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# API runtime data
+services/api/runtime-data/*
+!services/api/runtime-data/.gitkeep
+
+# Agent build output and licensed dependencies
+agent_builder/build/
+agent_builder/dist/
+agent_builder/installer/dependencies/*.exe
+agent_builder/installer/dependencies/*.msi
+!agent_builder/installer/dependencies/README.md
+
+# Published installer is produced by the release pipeline
+apps/web/public/downloads/agent/*.exe
+!apps/web/public/downloads/agent/.gitkeep
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini

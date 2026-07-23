@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.telesec.local/v1/agent-heartbeat.schema.json",
+  "title": "Telesec Agent Heartbeat",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "message_type", "agent_id", "agent_version", "hostname", "os_name", "service_status", "npcap_status", "sent_at"],
+  "properties": {
+    "schema_version": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/schemaVersion" },
+    "message_type": { "const": "agent.heartbeat" },
+    "agent_id": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/uuid" },
+    "agent_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "hostname": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "os_name": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "local_ip": {
+      "oneOf": [
+        { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/ipv4" },
+        { "type": "null" }
+      ]
+    },
+    "subnet": {
+      "oneOf": [
+        { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" },
+        { "type": "null" }
+      ]
+    },
+    "nmap_version": { "type": ["string", "null"], "maxLength": 64 },
+    "npcap_status": { "enum": ["available", "missing", "degraded", "unknown"] },
+    "service_status": { "enum": ["online", "busy", "degraded"] },
+    "current_command_id": {
+      "oneOf": [
+        { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/uuid" },
+        { "type": "null" }
+      ]
+    },
+    "sent_at": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" }
+  }
+}
+

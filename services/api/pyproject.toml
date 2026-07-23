@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "telesec-api"
+version = "0.1.0"
+description = "Telesec control server"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "fastapi>=0.139.2,<0.140",
+    "uvicorn[standard]>=0.51,<0.52",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx2>=2.7,<3",
+    "pytest>=8.4,<10",
+    "ruff>=0.15.22,<0.16",
+]
+
+[project.scripts]
+telesec-api = "telesec_api.main:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/telesec_api"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

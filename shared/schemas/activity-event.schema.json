@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.telesec.local/v1/activity-event.schema.json",
+  "title": "Telesec Activity Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "message_type", "event_id", "event_type", "actor_type", "severity", "message", "occurred_at"],
+  "properties": {
+    "schema_version": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/schemaVersion" },
+    "message_type": { "const": "activity.event" },
+    "event_id": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/uuid" },
+    "event_type": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "actor_type": { "enum": ["user", "server", "agent"] },
+    "actor_id": { "type": ["string", "null"], "maxLength": 128 },
+    "severity": { "enum": ["info", "warning", "error"] },
+    "message": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "resource_type": { "type": ["string", "null"], "maxLength": 128 },
+    "resource_id": { "type": ["string", "null"], "maxLength": 128 },
+    "details": { "type": "object", "maxProperties": 32 },
+    "occurred_at": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" }
+  }
+}
+

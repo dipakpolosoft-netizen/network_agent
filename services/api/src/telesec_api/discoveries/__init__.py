@@ -1,0 +1,1 @@
+"""Authorized network discovery resources."""
