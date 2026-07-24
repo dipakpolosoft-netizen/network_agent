@@ -6,7 +6,9 @@ from fastapi.testclient import TestClient
 from test_discovery_flow import authenticated_agent
 
 
-def completed_discovery(client: TestClient) -> tuple[dict, dict]:
+def completed_discovery(
+    client: TestClient, device_count: int = 2
+) -> tuple[dict, dict]:
     agent = authenticated_agent(client)
     authorization = {"Authorization": f"Bearer {agent['agent_credential']}"}
     created = client.post(
@@ -29,10 +31,10 @@ def completed_discovery(client: TestClient) -> tuple[dict, dict]:
     )
     devices = [
         {
-            "device_id": "selected-device-0001",
-            "ip": "192.168.1.10",
-            "hostname": "server-one",
-            "mac": "00:11:22:33:44:10",
+            "device_id": f"selected-device-{number:04d}",
+            "ip": f"192.168.1.{number + 9}",
+            "hostname": f"server-{number}",
+            "mac": f"00:11:22:33:44:{number:02x}",
             "vendor": "Example",
             "status": "up",
             "discovery_reason": "arp-response",
@@ -40,20 +42,8 @@ def completed_discovery(client: TestClient) -> tuple[dict, dict]:
             "is_agent": False,
             "first_seen": now,
             "last_seen": now,
-        },
-        {
-            "device_id": "selected-device-0002",
-            "ip": "192.168.1.11",
-            "hostname": "server-two",
-            "mac": "00:11:22:33:44:11",
-            "vendor": "Example",
-            "status": "up",
-            "discovery_reason": "arp-response",
-            "latency_ms": 1.1,
-            "is_agent": False,
-            "first_seen": now,
-            "last_seen": now,
-        },
+        }
+        for number in range(1, device_count + 1)
     ]
     uploaded = client.post(
         f"/agent/discoveries/{created['discovery_id']}/devices",
@@ -81,7 +71,7 @@ def completed_discovery(client: TestClient) -> tuple[dict, dict]:
             "message_type": "command.event",
             "status": "completed",
             "message": "Discovery completed",
-            "details": {"device_count": 2},
+            "details": {"device_count": device_count},
             "occurred_at": now,
         },
     )
@@ -227,3 +217,20 @@ def test_scan_rejects_unknown_or_excessive_device_selection(
         },
     )
     assert excessive.status_code == 422
+
+
+def test_scan_accepts_more_than_ten_discovered_devices(client: TestClient) -> None:
+    _agent, discovery = completed_discovery(client, device_count=12)
+    selected = [f"selected-device-{number:04d}" for number in range(1, 13)]
+
+    response = client.post(
+        f"/api/discoveries/{discovery['discovery_id']}/scan",
+        json={
+            "device_ids": selected,
+            "profile": "standard",
+            "authorization_confirmed": True,
+        },
+    )
+
+    assert response.status_code == 202
+    assert response.json()["total"] == 12

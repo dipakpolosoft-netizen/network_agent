@@ -16,7 +16,13 @@
     "latency_ms": { "type": ["number", "null"], "minimum": 0 },
     "is_agent": { "type": "boolean" },
     "first_seen": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" },
-    "last_seen": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" }
+    "last_seen": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" },
+    "discovery_scope": {
+      "anyOf": [
+        { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" },
+        { "type": "null" }
+      ]
+    }
   }
 }
 

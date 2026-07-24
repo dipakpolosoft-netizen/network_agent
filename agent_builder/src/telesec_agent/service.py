@@ -106,6 +106,13 @@ def service_command(action: str) -> None:
         _run_sc("stop", SERVICE_NAME)
         _wait_for_service_state("STOPPED")
         return
+    if action == "restart":
+        if _service_state() not in {None, "STOPPED"}:
+            _run_sc("stop", SERVICE_NAME)
+            _wait_for_service_state("STOPPED")
+        _run_sc("start", SERVICE_NAME)
+        _wait_for_service_state("RUNNING")
+        return
     if action == "remove":
         state = _service_state()
         if state is None:

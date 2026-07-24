@@ -37,7 +37,9 @@ def parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--server-url", required=True)
     bootstrap.add_argument("--enrollment-token", required=True)
     service = subcommands.add_parser("service")
-    service.add_argument("action", choices=["install", "start", "stop", "remove"])
+    service.add_argument(
+        "action", choices=["install", "start", "stop", "restart", "remove"]
+    )
     return root
 
 

@@ -124,6 +124,12 @@ input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--green); 
 .status.neutral { color: #5c6d67; background: #edf1f0; }.status.neutral > span { background: #85938e; }
 
 .scan-toolbar { min-height: 48px; padding: 7px 12px; background: #fcfdfd; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.scope-control { min-height: 66px; padding: 9px 12px; border-bottom: 1px solid var(--line); background: #f8fbfa; display: grid; grid-template-columns: minmax(130px, .7fr) minmax(220px, 1fr) auto; align-items: end; gap: 12px; }
+.scope-control > div:first-child, .scope-control label { min-width: 0; display: grid; gap: 4px; }
+.scope-control span { color: var(--muted); font-size: 9px; text-transform: uppercase; font-weight: 700; }
+.scope-control strong { overflow-wrap: anywhere; font-size: 11px; }
+.scope-control select { width: 100%; height: 34px; border: 1px solid #cbdad5; border-radius: 5px; background: #fff; color: var(--ink); padding: 0 28px 0 9px; font: inherit; font-size: 11px; }
+.scope-actions { display: flex; gap: 7px; }
 .discovery-callout { min-height: 62px; padding: 10px 13px; background: #f3f8f6; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; align-items: center; gap: 10px; }
 .discovery-callout.warning { background: #fff8e8; border-bottom-color: #edd9a6; }
 .discovery-callout.active { background: #eef8f5; }
@@ -164,6 +170,19 @@ input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--green); 
 .health-line span { color: #8eaaa1; font-size: 9px; text-transform: uppercase; }.health-line strong { overflow: hidden; text-overflow: ellipsis; font-size: 11px; white-space: nowrap; }
 .guidance { padding: 14px; background: #fff; border: 1px solid var(--line); border-radius: 6px; }
 .guidance h3 { margin: 5px 0 5px; font-size: 13px; }
+.live-operation { min-width: 0; padding: 13px; background: #fff; border: 1px solid var(--line); border-radius: 6px; }
+.live-operation-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.live-operation-header h3 { margin: 4px 0 0; font-size: 13px; }
+.operation-state { min-width: 0; margin-top: 10px; display: grid; gap: 6px; }
+.operation-state > span { color: var(--muted); font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
+.operation-command { min-width: 0; margin-top: 10px; padding: 8px; color: #d8efe7; background: #112a24; border-radius: 4px; display: flex; align-items: flex-start; gap: 6px; font-family: Consolas, "Courier New", monospace; font-size: 9px; line-height: 1.4; overflow-wrap: anywhere; white-space: normal; }
+.operation-command svg { flex: 0 0 auto; color: #5bd2a8; }
+.operation-events { min-width: 0; margin-top: 8px; border-top: 1px solid var(--line); }
+.operation-events > div { min-height: 31px; padding: 6px 0; border-bottom: 1px solid #e8eeec; display: grid; grid-template-columns: 55px minmax(0, 1fr); gap: 6px; }
+.operation-events > div:last-child { border-bottom: 0; }
+.operation-events time { color: #7a8b85; font-family: Consolas, "Courier New", monospace; font-size: 8px; }
+.operation-events span { min-width: 0; color: #3f554d; font-family: Consolas, "Courier New", monospace; font-size: 9px; line-height: 1.35; overflow-wrap: anywhere; }
+.operation-events p { margin: 8px 0 0; color: var(--muted); font-size: 10px; }
 
 .modal-backdrop, .drawer-backdrop { position: fixed; inset: 0; padding: 18px; z-index: 100; background: rgb(5 22 18 / 48%); display: grid; place-items: center; }
 .modal { width: min(460px, 100%); padding: 18px; background: #fff; border: 1px solid var(--line); border-radius: 7px; box-shadow: 0 24px 70px rgb(0 20 15 / 25%); }
@@ -240,6 +259,8 @@ input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--green); 
   .topbar h1 { font-size: 18px; }.top-actions .button.secondary { display: none; }
   .metrics { grid-template-columns: 1fr 1fr; }.metric { min-height: 58px; padding: 9px; }.metric strong { font-size: 17px; }
   .connection-actions, .scan-toolbar { width: 100%; flex-wrap: wrap; }.connection-actions .button { flex: 1; }
+  .scope-control { grid-template-columns: 1fr; align-items: stretch; }
+  .scope-actions .button { flex: 1; }
   .panel-header { align-items: flex-start; flex-direction: column; }.device-tools, .search-box { width: 100%; }
   .scan-toolbar > div:last-child { margin-left: auto; }
   .health-column { grid-template-columns: 1fr; }

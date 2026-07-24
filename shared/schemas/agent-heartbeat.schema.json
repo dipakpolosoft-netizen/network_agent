@@ -26,7 +26,34 @@
     },
     "nmap_version": { "type": ["string", "null"], "maxLength": 64 },
     "npcap_status": { "enum": ["available", "missing", "degraded", "unknown"] },
-    "service_status": { "enum": ["online", "busy", "degraded"] },
+    "discovery_ready": { "type": ["boolean", "null"] },
+    "discovery_network": {
+      "oneOf": [
+        { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" },
+        { "type": "null" }
+      ]
+    },
+    "discovery_interface": { "type": ["string", "null"], "maxLength": 255 },
+    "discovery_error": { "type": ["string", "null"], "maxLength": 1024 },
+    "discovery_capability": {
+      "type": ["string", "null"],
+      "enum": ["ready", "selection_required", "authorization_required", "unsupported", null]
+    },
+    "discovery_scope_options": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" }
+    },
+    "discovery_recommended_scope": {
+      "anyOf": [
+        { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" },
+        { "type": "null" }
+      ]
+    },
+    "discovery_requires_authorization": { "type": "boolean" },
+    "discovery_all_segments_available": { "type": "boolean" },
+    "service_status": { "enum": ["online", "busy", "degraded", "offline"] },
     "current_command_id": {
       "oneOf": [
         { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/uuid" },

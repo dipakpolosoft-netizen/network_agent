@@ -25,7 +25,25 @@
       "items": { "$ref": "https://schemas.telesec.local/v1/discovered-device.schema.json" },
       "maxItems": 4096
     },
-    "error": { "type": ["string", "null"], "maxLength": 2048 }
+    "error": { "type": ["string", "null"], "maxLength": 2048 },
+    "requested_scopes": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" }
+    },
+    "completed_scopes": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" }
+    },
+    "failed_scopes": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" }
+    }
   }
 }
 

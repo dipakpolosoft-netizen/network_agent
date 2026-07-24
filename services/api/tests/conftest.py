@@ -22,7 +22,7 @@ def settings(tmp_path: Path) -> Settings:
         heartbeat_interval_seconds=30,
         agent_offline_after_seconds=90,
         command_ttl_seconds=900,
-        max_scan_targets=10,
+        max_scan_targets=4096,
         scan_concurrency=3,
         allow_public_scopes=False,
         nvd_api_key=None,

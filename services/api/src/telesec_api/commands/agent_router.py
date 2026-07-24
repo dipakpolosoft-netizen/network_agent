@@ -19,11 +19,15 @@ from telesec_api.commands.service import (
     CommandService,
     InvalidCommandTransition,
 )
-from telesec_api.dependencies import get_command_service
+from telesec_api.dependencies import get_command_service, get_discovery_service
+from telesec_api.discoveries.service import DiscoveryService
 
 router = APIRouter(prefix="/agent/commands", tags=["agent protocol"])
 AuthenticatedAgent = Annotated[dict, Depends(authenticate_agent)]
 CommandServiceDependency = Annotated[CommandService, Depends(get_command_service)]
+DiscoveryServiceDependency = Annotated[
+    DiscoveryService, Depends(get_discovery_service)
+]
 
 
 @router.get("/next", response_model=AgentCommand | None)
@@ -44,6 +48,7 @@ def command_event(
     payload: CommandEvent,
     authenticated: AuthenticatedAgent,
     service: CommandServiceDependency,
+    discoveries: DiscoveryServiceDependency,
 ) -> CommandEventResponse:
     try:
         command = service.update_from_agent(
@@ -61,6 +66,7 @@ def command_event(
         raise HTTPException(
             status.HTTP_409_CONFLICT, "Invalid command status transition"
         ) from exc
+    discoveries.sync_command_event(command, payload)
     return CommandEventResponse(
         command_id=command_id,
         command_status=command["status"],

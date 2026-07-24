@@ -31,6 +31,7 @@ class ScanCommandHandler:
                 identity,
                 service_status="busy",
                 current_command_id=command_id,
+                activity="Scanning selected devices",
                 client=client,
             )
 

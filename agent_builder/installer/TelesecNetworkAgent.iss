@@ -386,11 +386,14 @@ procedure ProtectAgentData;
 var
   RootDirectory: String;
   PublicDirectory: String;
+  LogDirectory: String;
   ResultCode: Integer;
 begin
   RootDirectory := ExpandConstant('{commonappdata}\Telesec\NetworkAgent');
   PublicDirectory := RootDirectory + '\public';
+  LogDirectory := RootDirectory + '\logs';
   ForceDirectories(PublicDirectory);
+  ForceDirectories(LogDirectory);
   GrantPrivateDataAccess(RootDirectory);
   Exec(
     ExpandConstant('{sys}\icacls.exe'),
@@ -422,6 +425,16 @@ begin
   );
   if ResultCode <> 0 then
     RaiseException('Unable to publish the Telesec tray status securely.');
+  Exec(
+    ExpandConstant('{sys}\icacls.exe'),
+    '"' + LogDirectory + '" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX" /T /C',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  );
+  if ResultCode <> 0 then
+    RaiseException('Unable to publish the Telesec agent logs securely.');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

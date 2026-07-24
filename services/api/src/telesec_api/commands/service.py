@@ -70,6 +70,34 @@ class CommandService:
         )
         return record
 
+    def get(self, command_id: str) -> dict:
+        command = self.store.read("commands", command_id)
+        if command is None:
+            raise CommandNotFound
+        return command
+
+    def cancel_pending(self, command_id: str, *, message: str) -> dict:
+        with self.store.locked():
+            command = self.store.read("commands", command_id)
+            if command is None:
+                raise CommandNotFound
+            if command["status"] != "queued":
+                return command
+            now = isoformat(utc_now())
+            command["status"] = "cancelled"
+            command["last_message"] = message
+            command["updated_at"] = now
+            self.store.write("commands", command_id, command)
+            record_activity(
+                self.store,
+                event_type="command.cancelled",
+                message=message,
+                resource_type="command",
+                resource_id=command_id,
+                details={"agent_id": command["agent_id"]},
+            )
+            return command
+
     def claim_next(self, agent_id: str) -> dict | None:
         with self.store.locked():
             commands = sorted(

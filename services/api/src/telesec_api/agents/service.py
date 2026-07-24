@@ -66,6 +66,15 @@ class AgentService:
                 "subnet": None,
                 "nmap_version": None,
                 "npcap_status": "unknown",
+                "discovery_ready": None,
+                "discovery_network": None,
+                "discovery_interface": None,
+                "discovery_error": None,
+                "discovery_capability": None,
+                "discovery_scope_options": [],
+                "discovery_recommended_scope": None,
+                "discovery_requires_authorization": False,
+                "discovery_all_segments_available": False,
                 "current_command_id": None,
                 "enrolled_at": isoformat(now),
                 "last_heartbeat_at": None,
@@ -116,6 +125,19 @@ class AgentService:
                 "subnet": payload.subnet,
                 "nmap_version": payload.nmap_version,
                 "npcap_status": payload.npcap_status,
+                "discovery_ready": payload.discovery_ready,
+                "discovery_network": payload.discovery_network,
+                "discovery_interface": payload.discovery_interface,
+                "discovery_error": payload.discovery_error,
+                "discovery_capability": payload.discovery_capability,
+                "discovery_scope_options": payload.discovery_scope_options,
+                "discovery_recommended_scope": payload.discovery_recommended_scope,
+                "discovery_requires_authorization": (
+                    payload.discovery_requires_authorization
+                ),
+                "discovery_all_segments_available": (
+                    payload.discovery_all_segments_available
+                ),
                 "current_command_id": (
                     str(payload.current_command_id)
                     if payload.current_command_id

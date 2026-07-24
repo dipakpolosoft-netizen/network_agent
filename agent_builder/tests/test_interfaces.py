@@ -51,3 +51,96 @@ def test_scope_rejects_networks_larger_than_safety_ceiling(monkeypatch) -> None:
     )
 
     assert interfaces.eligible_scopes() == []
+
+
+def test_scope_error_explains_public_and_oversized_network(monkeypatch) -> None:
+    monkeypatch.setattr(
+        interfaces.psutil,
+        "net_if_stats",
+        lambda: {"Ethernet": Stats(True)},
+    )
+    monkeypatch.setattr(
+        interfaces.psutil,
+        "net_if_addrs",
+        lambda: {
+            "Ethernet": [
+                Address(socket.AF_INET, "172.168.1.248", "255.255.252.0", None, None)
+            ]
+        },
+    )
+
+    try:
+        interfaces.select_scope()
+    except interfaces.ScopeError as exc:
+        assert exc.code == "scope_not_private"
+        assert "172.168.0.0/22" in str(exc)
+        assert "1024 addresses" in str(exc)
+    else:
+        raise AssertionError("Expected unsupported network scope")
+
+
+def test_public_slash_22_offers_four_slash_24_segments(monkeypatch) -> None:
+    monkeypatch.setattr(
+        interfaces.psutil,
+        "net_if_stats",
+        lambda: {"Ethernet": Stats(True)},
+    )
+    monkeypatch.setattr(
+        interfaces.psutil,
+        "net_if_addrs",
+        lambda: {
+            "Ethernet": [
+                Address(socket.AF_INET, "172.168.1.248", "255.255.252.0", None, None)
+            ]
+        },
+    )
+
+    capability = interfaces.discovery_capability()
+
+    assert capability.connected_scope.network == "172.168.0.0/22"
+    assert capability.scope_options == (
+        "172.168.0.0/24",
+        "172.168.1.0/24",
+        "172.168.2.0/24",
+        "172.168.3.0/24",
+    )
+    assert capability.recommended_scope == "172.168.1.0/24"
+    assert capability.requires_authorization is True
+    assert capability.all_segments_available is True
+
+
+def test_requested_public_scope_must_be_authorized_and_attached(monkeypatch) -> None:
+    monkeypatch.setattr(
+        interfaces.psutil,
+        "net_if_stats",
+        lambda: {"Ethernet": Stats(True)},
+    )
+    monkeypatch.setattr(
+        interfaces.psutil,
+        "net_if_addrs",
+        lambda: {
+            "Ethernet": [
+                Address(socket.AF_INET, "172.168.1.248", "255.255.252.0", None, None)
+            ]
+        },
+    )
+
+    plan = interfaces.resolve_discovery_plan(
+        ["172.168.1.0/24"],
+        connected_network="172.168.0.0/22",
+        interface_name="Ethernet",
+        authorization_confirmed=True,
+    )
+
+    assert plan.scopes == ("172.168.1.0/24",)
+    try:
+        interfaces.resolve_discovery_plan(
+            ["172.169.1.0/24"],
+            connected_network="172.168.0.0/22",
+            interface_name="Ethernet",
+            authorization_confirmed=True,
+        )
+    except interfaces.ScopeError as exc:
+        assert exc.code == "scope_outside_connected_network"
+    else:
+        raise AssertionError("Expected a scope outside the adapter to be rejected")

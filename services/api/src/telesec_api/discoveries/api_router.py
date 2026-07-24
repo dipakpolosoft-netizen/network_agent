@@ -15,8 +15,10 @@ from telesec_api.discoveries.models import (
 )
 from telesec_api.discoveries.service import (
     AgentOffline,
+    DiscoveryInProgress,
     DiscoveryNotFound,
     DiscoveryService,
+    InvalidDiscoveryScope,
     ScannerUnavailable,
 )
 
@@ -45,17 +47,26 @@ def list_discoveries(
 )
 def create_discovery(
     agent_id: UUID,
-    _payload: DiscoveryCreateRequest,
+    payload: DiscoveryCreateRequest,
     service: DiscoveryServiceDependency,
 ) -> DiscoveryCreateResponse:
     try:
-        record = service.create(agent_id=str(agent_id))
+        record = service.create(
+            agent_id=str(agent_id),
+            requested_scope=payload.scope,
+            mode=payload.mode,
+            authorization_confirmed=payload.authorization_confirmed,
+        )
     except DiscoveryNotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found") from exc
     except AgentOffline as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, "Agent is offline") from exc
     except ScannerUnavailable as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except DiscoveryInProgress as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except InvalidDiscoveryScope as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     return DiscoveryCreateResponse(
         discovery_id=record["discovery_id"],
         command_id=record["command_id"],
@@ -73,5 +84,21 @@ def get_discovery(
 ) -> DiscoveryPublic:
     try:
         return DiscoveryPublic.model_validate(service.get(str(discovery_id)))
+    except DiscoveryNotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Discovery not found") from exc
+
+
+@router.post(
+    "/api/discoveries/{discovery_id}/cancel",
+    response_model=DiscoveryPublic,
+)
+def cancel_discovery(
+    discovery_id: UUID,
+    service: DiscoveryServiceDependency,
+) -> DiscoveryPublic:
+    try:
+        return DiscoveryPublic.model_validate(
+            service.request_cancel(str(discovery_id))
+        )
     except DiscoveryNotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Discovery not found") from exc

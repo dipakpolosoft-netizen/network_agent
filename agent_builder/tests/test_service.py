@@ -48,6 +48,26 @@ def test_service_stop_waits_until_windows_reports_stopped(monkeypatch):
     assert waits == ["STOPPED"]
 
 
+def test_service_restart_stops_then_starts(monkeypatch):
+    calls = []
+    waits = []
+    monkeypatch.setattr(service, "_service_state", lambda: "RUNNING")
+    monkeypatch.setattr(service, "_run_sc", lambda *args: calls.append(args))
+    monkeypatch.setattr(
+        service,
+        "_wait_for_service_state",
+        lambda expected: waits.append(expected),
+    )
+
+    service.service_command("restart")
+
+    assert calls == [
+        ("stop", service.SERVICE_NAME),
+        ("start", service.SERVICE_NAME),
+    ]
+    assert waits == ["STOPPED", "RUNNING"]
+
+
 def test_service_remove_stops_service_before_deletion(monkeypatch):
     calls = []
     waits = []

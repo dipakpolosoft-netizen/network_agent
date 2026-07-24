@@ -75,6 +75,18 @@ class TelesecApiClient:
             credential=credential,
         )
 
+    def discovery_control(
+        self,
+        discovery_id: str,
+        *,
+        credential: str,
+    ) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/agent/discoveries/{discovery_id}/control",
+            credential=credential,
+        )
+
     def upload_scan_progress(
         self,
         scan_id: str,

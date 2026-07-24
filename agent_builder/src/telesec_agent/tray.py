@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 import subprocess
+import sys
 import webbrowser
 from contextlib import suppress
 from ctypes import wintypes
@@ -13,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+from telesec_agent import __version__
 from telesec_agent.config import AgentPaths, default_data_directory
 
 SERVICE_NAME = "TelesecNetworkAgent"
@@ -28,6 +31,13 @@ REFRESH_MS = 5000
 CMD_OPEN = 1001
 CMD_REFRESH = 1002
 CMD_EXIT = 1003
+CMD_START_SERVICE = 1004
+CMD_STOP_SERVICE = 1005
+CMD_RESTART_SERVICE = 1006
+CMD_VIEW_LOG = 1007
+CMD_OPEN_LOG_FOLDER = 1008
+CMD_DIAGNOSTICS = 1009
+CMD_ABOUT = 1010
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +48,7 @@ class TraySnapshot:
     last_heartbeat: str
     nmap: str
     npcap: str
+    activity: str | None
     dashboard_url: str | None
 
 
@@ -137,6 +148,7 @@ def collect_snapshot(
         last_heartbeat=_time_label(last_heartbeat, current_time),
         nmap=str(document.get("nmap_version") or "Unavailable"),
         npcap=npcap.replace("_", " ").title(),
+        activity=(str(document["activity"]) if document.get("activity") else None),
         dashboard_url=str(dashboard_url) if dashboard_url else None,
     )
 
@@ -394,6 +406,10 @@ class TrayApplication:
         win32gui.AppendMenu(menu, disabled, 0, "Telesec Network Agent")
         win32gui.AppendMenu(menu, disabled, 0, f"Status: {self.snapshot.label}")
         win32gui.AppendMenu(menu, disabled, 0, f"Service: {self.snapshot.service}")
+        if self.snapshot.activity:
+            win32gui.AppendMenu(
+                menu, disabled, 0, f"Activity: {self.snapshot.activity}"
+            )
         win32gui.AppendMenu(
             menu,
             disabled,
@@ -408,7 +424,40 @@ class TrayApplication:
         if not self.snapshot.dashboard_url:
             open_flags |= win32con.MF_GRAYED
         win32gui.AppendMenu(menu, open_flags, CMD_OPEN, "Open Telesec Dashboard")
+        win32gui.AppendMenu(menu, win32con.MF_STRING, CMD_VIEW_LOG, "View Agent Log")
+        win32gui.AppendMenu(
+            menu,
+            win32con.MF_STRING,
+            CMD_OPEN_LOG_FOLDER,
+            "Open Log Folder",
+        )
+        win32gui.AppendMenu(
+            menu, win32con.MF_STRING, CMD_DIAGNOSTICS, "Run Diagnostics"
+        )
+        win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, None)
+        if self.snapshot.service == "Stopped":
+            win32gui.AppendMenu(
+                menu,
+                win32con.MF_STRING,
+                CMD_START_SERVICE,
+                "Start Agent Service",
+            )
+        else:
+            win32gui.AppendMenu(
+                menu,
+                win32con.MF_STRING,
+                CMD_RESTART_SERVICE,
+                "Restart Agent Service",
+            )
+            win32gui.AppendMenu(
+                menu,
+                win32con.MF_STRING,
+                CMD_STOP_SERVICE,
+                "Stop Agent Service",
+            )
         win32gui.AppendMenu(menu, win32con.MF_STRING, CMD_REFRESH, "Refresh")
+        win32gui.AppendMenu(menu, win32con.MF_SEPARATOR, 0, None)
+        win32gui.AppendMenu(menu, win32con.MF_STRING, CMD_ABOUT, "About Telesec")
         win32gui.AppendMenu(menu, win32con.MF_STRING, CMD_EXIT, "Exit tray")
         win32gui.SetMenuDefaultItem(menu, CMD_OPEN, 0)
         position = win32gui.GetCursorPos()
@@ -433,6 +482,75 @@ class TrayApplication:
         if self.snapshot.dashboard_url:
             webbrowser.open(self.snapshot.dashboard_url)
 
+    def _open_log(self) -> None:
+        if self.paths.log.is_file():
+            self._open_path(self.paths.log)
+            return
+        self._message("Telesec Agent Log", "No agent log has been written yet.")
+
+    def _open_log_folder(self) -> None:
+        self._open_path(self.paths.log.parent)
+
+    @staticmethod
+    def _open_path(path: Path) -> None:
+        try:
+            os.startfile(str(path))
+        except OSError as exc:
+            TrayApplication._message("Telesec Network Agent", str(exc))
+
+    def _show_diagnostics(self) -> None:
+        details = [
+            f"Version: {__version__}",
+            f"Connection: {self.snapshot.label}",
+            f"Service: {self.snapshot.service}",
+            f"Last heartbeat: {self.snapshot.last_heartbeat}",
+            f"Nmap: {self.snapshot.nmap}",
+            f"Npcap: {self.snapshot.npcap}",
+        ]
+        if self.snapshot.activity:
+            details.append(f"Activity: {self.snapshot.activity}")
+        details.append(f"Data: {self.paths.root}")
+        self._message("Telesec Diagnostics", "\n".join(details))
+
+    @staticmethod
+    def _message(title: str, message: str, flags: int = 0x40) -> int:
+        return int(ctypes.windll.user32.MessageBoxW(None, message, title, flags))
+
+    def _service_action(self, action: str) -> None:
+        if action in {"stop", "restart"} and self.snapshot.activity:
+            confirmed = self._message(
+                "Telesec Network Agent",
+                f"{self.snapshot.activity} is active. Continue with {action}?",
+                0x21,
+            )
+            if confirmed != 1:
+                return
+        if getattr(sys, "frozen", False):
+            executable = Path(sys.executable).with_name("TelesecAgent.exe")
+            parameters = f"service {action}"
+        else:
+            executable = Path(sys.executable)
+            parameters = f'-m telesec_agent.main service {action}'
+        if not executable.is_file():
+            self._message(
+                "Telesec Network Agent",
+                f"Agent executable was not found: {executable}",
+            )
+            return
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            str(executable),
+            parameters,
+            str(executable.parent),
+            0,
+        )
+        if result <= 32:
+            self._message(
+                "Telesec Network Agent",
+                "Windows did not start the requested service action.",
+            )
+
     def _on_command(self, _hwnd, _message, wparam, _lparam):
         import win32api
         import win32gui
@@ -440,18 +558,37 @@ class TrayApplication:
         command = win32api.LOWORD(wparam)
         if command == CMD_OPEN:
             self._open_dashboard()
+        elif command == CMD_VIEW_LOG:
+            self._open_log()
+        elif command == CMD_OPEN_LOG_FOLDER:
+            self._open_log_folder()
+        elif command == CMD_DIAGNOSTICS:
+            self._show_diagnostics()
+        elif command == CMD_START_SERVICE:
+            self._service_action("start")
+        elif command == CMD_STOP_SERVICE:
+            self._service_action("stop")
+        elif command == CMD_RESTART_SERVICE:
+            self._service_action("restart")
         elif command == CMD_REFRESH:
             self._replace_tray_icon(collect_snapshot(self.paths.public_status))
+        elif command == CMD_ABOUT:
+            self._message(
+                "About Telesec",
+                f"Telesec Network Agent\nVersion {__version__}",
+            )
         elif command == CMD_EXIT:
             win32gui.DestroyWindow(self.hwnd)
         return 0
 
     def _on_tray(self, _hwnd, _message, _wparam, lparam):
+        import win32api
         import win32con
 
-        if lparam == win32con.WM_LBUTTONDBLCLK:
+        event = win32api.LOWORD(lparam)
+        if event == win32con.WM_LBUTTONDBLCLK:
             self._open_dashboard()
-        elif lparam in {win32con.WM_RBUTTONUP, win32con.WM_CONTEXTMENU}:
+        elif event in {win32con.WM_RBUTTONUP, win32con.WM_CONTEXTMENU}:
             self._show_menu()
         return 0
 

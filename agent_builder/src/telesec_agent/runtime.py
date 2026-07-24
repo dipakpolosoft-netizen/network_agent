@@ -43,7 +43,7 @@ def build_runtime(
     enrollment = EnrollmentManager(storage, paths, identities)
     heartbeat = HeartbeatSender(storage, paths.state, paths.public_status)
     nmap = NmapRunner()
-    discovery = DiscoveryCommandHandler(nmap)
+    discovery = DiscoveryCommandHandler(nmap, heartbeat=heartbeat)
     scheduler = ScanScheduler(nmap, storage, paths.root / "scans")
     scan = ScanCommandHandler(scheduler, heartbeat)
     commands = CommandDispatcher(discovery, scan)

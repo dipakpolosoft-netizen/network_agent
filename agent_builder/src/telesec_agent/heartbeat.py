@@ -16,6 +16,7 @@ from telesec_agent import __version__
 from telesec_agent.api_client import TelesecApiClient
 from telesec_agent.config import dashboard_url_for_server
 from telesec_agent.enrollment import AgentIdentity, timestamp
+from telesec_agent.scanning.interfaces import ScopeError, discovery_capability
 from telesec_agent.scanning.nmap_runner import find_nmap_executable
 from telesec_agent.storage import AgentStorage
 
@@ -87,6 +88,42 @@ def npcap_status() -> str:
     return "available" if "RUNNING" in result.stdout else "degraded"
 
 
+def discovery_scope() -> dict:
+    try:
+        capability = discovery_capability()
+    except ScopeError as exc:
+        return {
+            "ready": False,
+            "network": None,
+            "local_ip": None,
+            "interface": None,
+            "error": str(exc),
+            "capability": "unsupported",
+            "scope_options": [],
+            "recommended_scope": None,
+            "requires_authorization": False,
+            "all_segments_available": False,
+        }
+    scope = capability.connected_scope
+    warning = (
+        f"{scope.network} uses public-range addressing and requires authorization"
+        if capability.requires_authorization
+        else None
+    )
+    return {
+        "ready": True,
+        "network": scope.network,
+        "local_ip": scope.local_ip,
+        "interface": scope.interface_name,
+        "error": warning,
+        "capability": capability.capability,
+        "scope_options": list(capability.scope_options),
+        "recommended_scope": capability.recommended_scope,
+        "requires_authorization": capability.requires_authorization,
+        "all_segments_available": capability.all_segments_available,
+    }
+
+
 class HeartbeatSender:
     def __init__(
         self,
@@ -104,11 +141,13 @@ class HeartbeatSender:
         *,
         service_status: str = "online",
         current_command_id: str | None = None,
+        activity: str | None = None,
         client: HeartbeatClient | None = None,
     ) -> dict:
         network = active_network()
         detected_nmap = nmap_version()
         detected_npcap = npcap_status()
+        scope = discovery_scope()
         payload = {
             "schema_version": "1.0",
             "message_type": "agent.heartbeat",
@@ -116,10 +155,19 @@ class HeartbeatSender:
             "agent_version": __version__,
             "hostname": socket.gethostname(),
             "os_name": f"{platform.system()} {platform.release()}",
-            "local_ip": network.local_ip,
-            "subnet": network.subnet,
+            "local_ip": scope["local_ip"] or network.local_ip,
+            "subnet": scope["network"] or network.subnet,
             "nmap_version": detected_nmap,
             "npcap_status": detected_npcap,
+            "discovery_ready": scope["ready"],
+            "discovery_network": scope["network"],
+            "discovery_interface": scope["interface"],
+            "discovery_error": scope["error"],
+            "discovery_capability": scope["capability"],
+            "discovery_scope_options": scope["scope_options"],
+            "discovery_recommended_scope": scope["recommended_scope"],
+            "discovery_requires_authorization": scope["requires_authorization"],
+            "discovery_all_segments_available": scope["all_segments_available"],
             "service_status": service_status,
             "current_command_id": current_command_id,
             "sent_at": timestamp(),
@@ -149,7 +197,17 @@ class HeartbeatSender:
                     "dashboard_url": dashboard_url_for_server(identity.server_url),
                     "nmap_version": detected_nmap,
                     "npcap_status": detected_npcap,
+                    "discovery_ready": scope["ready"],
+                    "discovery_network": scope["network"],
+                    "discovery_interface": scope["interface"],
+                    "discovery_error": scope["error"],
+                    "discovery_capability": scope["capability"],
+                    "discovery_scope_options": scope["scope_options"],
+                    "discovery_recommended_scope": scope["recommended_scope"],
+                    "discovery_requires_authorization": scope["requires_authorization"],
+                    "discovery_all_segments_available": scope["all_segments_available"],
                     "current_command_id": current_command_id,
+                    "activity": activity,
                 },
             )
         return response

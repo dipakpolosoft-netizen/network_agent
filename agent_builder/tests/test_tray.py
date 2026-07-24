@@ -20,6 +20,7 @@ def write_status(path, *, age_seconds=10, status="online"):
                 "dashboard_url": "http://127.0.0.1:3000/network-agent",
                 "nmap_version": None,
                 "npcap_status": "missing",
+                "activity": "Discovering network" if status == "busy" else None,
             }
         ),
         encoding="utf-8",
@@ -66,6 +67,7 @@ def test_busy_agent_uses_attention_icon(tmp_path):
 
     assert snapshot.tone == "attention"
     assert snapshot.label == "Scanning"
+    assert snapshot.activity == "Discovering network"
 
 
 def test_invalid_heartbeat_interval_does_not_break_status(tmp_path):

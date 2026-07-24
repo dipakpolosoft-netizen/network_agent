@@ -9,7 +9,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from telesec_api.agents.auth import authenticate_agent
 from telesec_api.dependencies import get_discovery_service
-from telesec_api.discoveries.models import DiscoveryPublic, DiscoveryResult
+from telesec_api.discoveries.models import (
+    DiscoveryControlResponse,
+    DiscoveryPublic,
+    DiscoveryResult,
+)
 from telesec_api.discoveries.service import (
     DiscoveryNotFound,
     DiscoveryOwnershipError,
@@ -45,3 +49,21 @@ def upload_discovery(
     except InvalidDiscoveryResult as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     return DiscoveryPublic.model_validate(record)
+
+
+@router.get("/{discovery_id}/control", response_model=DiscoveryControlResponse)
+def discovery_control(
+    discovery_id: UUID,
+    authenticated: AuthenticatedAgent,
+    service: DiscoveryServiceDependency,
+) -> DiscoveryControlResponse:
+    try:
+        return DiscoveryControlResponse.model_validate(
+            service.control(str(discovery_id), authenticated["agent_id"])
+        )
+    except DiscoveryNotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Discovery not found") from exc
+    except DiscoveryOwnershipError as exc:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "Discovery belongs to another agent"
+        ) from exc

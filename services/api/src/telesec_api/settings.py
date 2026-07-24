@@ -51,7 +51,7 @@ class Settings:
                 os.getenv("TELESEC_AGENT_OFFLINE_AFTER_SECONDS", "90")
             ),
             command_ttl_seconds=int(os.getenv("TELESEC_COMMAND_TTL_SECONDS", "900")),
-            max_scan_targets=int(os.getenv("TELESEC_MAX_SCAN_TARGETS", "10")),
+            max_scan_targets=int(os.getenv("TELESEC_MAX_SCAN_TARGETS", "4096")),
             scan_concurrency=int(os.getenv("TELESEC_SCAN_CONCURRENCY", "3")),
             allow_public_scopes=_as_bool(
                 os.getenv("TELESEC_ALLOW_PUBLIC_SCOPES", "false")

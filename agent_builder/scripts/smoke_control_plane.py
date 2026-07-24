@@ -8,6 +8,7 @@ import threading
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 from urllib.request import Request, urlopen
 
 import uvicorn
@@ -20,7 +21,8 @@ from telesec_agent.enrollment import EnrollmentManager, IdentityStore
 from telesec_agent.heartbeat import HeartbeatSender
 from telesec_agent.job_scheduler import ScanScheduler
 from telesec_agent.scanning.discovery import DiscoveryCommandHandler
-from telesec_agent.scanning.interfaces import InterfaceScope
+from telesec_agent.scanning.interfaces import InterfaceScope, ResolvedDiscoveryPlan
+from telesec_agent.scanning.nmap_runner import DiscoveryProgress
 from telesec_agent.scanning.scan import ScanCommandHandler
 from telesec_agent.security.dpapi import DpapiProtector
 from telesec_agent.storage import AgentStorage
@@ -41,8 +43,16 @@ DISCOVERY_XML = """<?xml version="1.0"?>
 
 
 class FixtureNmap:
-    def discover(self, network: str) -> str:
+    def discover(
+        self,
+        network: str,
+        *,
+        cancel_requested,
+        progress_callback,
+    ) -> str:
         assert network == "192.168.1.0/24"
+        assert cancel_requested() is False
+        progress_callback(DiscoveryProgress(1, 100.0, 2))
         return DISCOVERY_XML
 
 
@@ -102,7 +112,7 @@ def main() -> int:
             heartbeat_interval_seconds=30,
             agent_offline_after_seconds=90,
             command_ttl_seconds=900,
-            max_scan_targets=10,
+            max_scan_targets=4096,
             scan_concurrency=3,
             allow_public_scopes=False,
         )
@@ -144,7 +154,22 @@ def main() -> int:
             )
             identities = IdentityStore(storage, paths, DpapiProtector())
             identity = EnrollmentManager(storage, paths, identities).ensure_enrolled()
-            HeartbeatSender(storage, paths.state).send(identity)
+            with patch(
+                "telesec_agent.heartbeat.discovery_scope",
+                return_value={
+                    "ready": True,
+                    "network": "192.168.1.0/24",
+                    "local_ip": "192.168.1.25",
+                    "interface": "Ethernet",
+                    "error": None,
+                    "capability": "ready",
+                    "scope_options": ["192.168.1.0/24"],
+                    "recommended_scope": "192.168.1.0/24",
+                    "requires_authorization": False,
+                    "all_segments_available": False,
+                },
+            ):
+                HeartbeatSender(storage, paths.state).send(identity)
 
             discovery = request_json(
                 f"{server_url}/api/agents/{identity.agent_id}/discover",
@@ -160,7 +185,13 @@ def main() -> int:
                 network="192.168.1.0/24",
                 is_virtual=False,
             )
-            DiscoveryCommandHandler(FixtureNmap(), lambda: scope).handle(
+            DiscoveryCommandHandler(
+                FixtureNmap(),
+                lambda: scope,
+                lambda *_args, **_kwargs: ResolvedDiscoveryPlan(
+                    scope, ("192.168.1.0/24",)
+                ),
+            ).handle(
                 command,
                 identity,
                 agent_client,

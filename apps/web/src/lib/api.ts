@@ -17,6 +17,15 @@ export type Agent = {
   subnet: string | null;
   nmap_version: string | null;
   npcap_status: "available" | "missing" | "degraded" | "unknown";
+  discovery_ready: boolean | null;
+  discovery_network: string | null;
+  discovery_interface: string | null;
+  discovery_error: string | null;
+  discovery_capability: "ready" | "selection_required" | "authorization_required" | "unsupported" | null;
+  discovery_scope_options: string[];
+  discovery_recommended_scope: string | null;
+  discovery_requires_authorization: boolean;
+  discovery_all_segments_available: boolean;
   current_command_id: string | null;
   enrolled_at: string;
   last_heartbeat_at: string | null;
@@ -34,6 +43,7 @@ export type Device = {
   is_agent: boolean;
   first_seen: string;
   last_seen: string;
+  discovery_scope: string | null;
 };
 
 export type Discovery = {
@@ -41,15 +51,36 @@ export type Discovery = {
   command_id: string;
   agent_id: string;
   status: string;
+  stage: string;
   network: string | null;
   interface_name: string | null;
   device_count: number;
+  found_count: number;
+  progress_percent: number | null;
+  cancel_requested: boolean;
   authorization_confirmed: boolean;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
   devices: Device[];
   error: string | null;
+  events: Array<{
+    event_id: string;
+    status: string;
+    stage: string;
+    message: string;
+    occurred_at: string;
+    progress_percent: number | null;
+    found_count: number;
+  }>;
+  mode: "selected" | "all";
+  connected_network: string | null;
+  requested_scopes: string[];
+  completed_scopes: string[];
+  failed_scopes: string[];
+  current_scope: string | null;
+  total_scopes: number;
+  public_scope_authorized: boolean;
 };
 
 export type PortResult = {
@@ -169,10 +200,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ label, site_name: siteName || null }),
     }),
-  discover: (agentId: string) =>
+  discover: (
+    agentId: string,
+    scope: string | null,
+    mode: "selected" | "all",
+  ) =>
     request(`/api/agents/${agentId}/discover`, {
       method: "POST",
-      body: JSON.stringify({ authorization_confirmed: true }),
+      body: JSON.stringify({ authorization_confirmed: true, scope, mode }),
+    }),
+  cancelDiscovery: (discoveryId: string) =>
+    request<Discovery>(`/api/discoveries/${discoveryId}/cancel`, {
+      method: "POST",
     }),
   scan: (
     discoveryId: string,

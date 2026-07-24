@@ -22,6 +22,17 @@ class AgentHeartbeat(StrictModel):
     subnet: str | None = None
     nmap_version: str | None = Field(default=None, max_length=64)
     npcap_status: Literal["available", "missing", "degraded", "unknown"]
+    discovery_ready: bool | None = None
+    discovery_network: str | None = None
+    discovery_interface: str | None = Field(default=None, max_length=255)
+    discovery_error: str | None = Field(default=None, max_length=1024)
+    discovery_capability: Literal[
+        "ready", "selection_required", "authorization_required", "unsupported"
+    ] | None = None
+    discovery_scope_options: list[str] = Field(default_factory=list, max_length=256)
+    discovery_recommended_scope: str | None = None
+    discovery_requires_authorization: bool = False
+    discovery_all_segments_available: bool = False
     service_status: Literal["online", "busy", "degraded", "offline"]
     current_command_id: UUID | None = None
     sent_at: datetime
@@ -40,6 +51,15 @@ class AgentPublic(StrictModel):
     subnet: str | None
     nmap_version: str | None
     npcap_status: Literal["available", "missing", "degraded", "unknown"]
+    discovery_ready: bool | None = None
+    discovery_network: str | None = None
+    discovery_interface: str | None = None
+    discovery_error: str | None = None
+    discovery_capability: str | None = None
+    discovery_scope_options: list[str] = Field(default_factory=list)
+    discovery_recommended_scope: str | None = None
+    discovery_requires_authorization: bool = False
+    discovery_all_segments_available: bool = False
     current_command_id: UUID | None
     enrolled_at: datetime
     last_heartbeat_at: datetime | None

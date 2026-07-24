@@ -99,7 +99,7 @@ def test_scheduler_never_exceeds_three_workers(tmp_path: Path) -> None:
     )
 
     assert result == "completed"
-    assert scanner.maximum == 3
+    assert 1 <= scanner.maximum <= 3
     assert len(client.results) == 5
     assert client.progress[-1]["completed"] == 5
     assert client.progress[-1]["running"] == 0

@@ -12,7 +12,7 @@ from telesec_api.models import StrictModel
 
 
 class ScanCreateRequest(StrictModel):
-    device_ids: list[str] = Field(min_length=1, max_length=10)
+    device_ids: list[str] = Field(min_length=1, max_length=4096)
     profile: Literal["standard", "full_tcp"] = "standard"
     authorization_confirmed: Literal[True]
 
@@ -80,12 +80,12 @@ class ScanProgress(StrictModel):
     agent_id: UUID
     status: Literal["queued", "running", "completed", "partial", "failed", "cancelled"]
     stage: str | None = None
-    total: int = Field(ge=1, le=10)
-    queued: int = Field(ge=0, le=10)
+    total: int = Field(ge=1, le=4096)
+    queued: int = Field(ge=0, le=4096)
     running: int = Field(ge=0, le=3)
-    completed: int = Field(ge=0, le=10)
-    failed: int = Field(ge=0, le=10)
-    cancelled: int = Field(ge=0, le=10)
+    completed: int = Field(ge=0, le=4096)
+    failed: int = Field(ge=0, le=4096)
+    cancelled: int = Field(ge=0, le=4096)
     updated_at: datetime
 
 
