@@ -3,7 +3,7 @@ from __future__ import annotations
 import socket
 from collections import namedtuple
 
-from telesec_agent.scanning import interfaces
+from forgesec_agent.scanning import interfaces
 
 Address = namedtuple("Address", "family address netmask broadcast ptp")
 Stats = namedtuple("Stats", "isup")
@@ -32,6 +32,48 @@ def test_scope_prefers_physical_private_interface(monkeypatch) -> None:
 
     assert selected.interface_name == "Ethernet"
     assert selected.network == "192.168.1.0/24"
+
+
+def test_connected_scope_prefers_physical_ethernet_over_windows_vethernet(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        interfaces.psutil,
+        "net_if_stats",
+        lambda: {
+            "Ethernet": Stats(True),
+            "vEthernet (Default Switch)": Stats(True),
+            "vEthernet (WSL (Hyper-V firewall))": Stats(True),
+        },
+    )
+    monkeypatch.setattr(
+        interfaces.psutil,
+        "net_if_addrs",
+        lambda: {
+            "vEthernet (Default Switch)": [
+                Address(socket.AF_INET, "172.25.64.1", "255.255.240.0", None, None)
+            ],
+            "vEthernet (WSL (Hyper-V firewall))": [
+                Address(socket.AF_INET, "172.31.176.1", "255.255.240.0", None, None)
+            ],
+            "Ethernet": [
+                Address(socket.AF_INET, "172.168.1.248", "255.255.252.0", None, None)
+            ],
+        },
+    )
+
+    capability = interfaces.discovery_capability()
+
+    assert capability.connected_scope.interface_name == "Ethernet"
+    assert capability.connected_scope.network == "172.168.0.0/22"
+    assert capability.scope_options == (
+        "172.168.0.0/24",
+        "172.168.1.0/24",
+        "172.168.2.0/24",
+        "172.168.3.0/24",
+    )
+    assert capability.recommended_scope == "172.168.1.0/24"
+    assert capability.requires_authorization is True
 
 
 def test_scope_rejects_networks_larger_than_safety_ceiling(monkeypatch) -> None:

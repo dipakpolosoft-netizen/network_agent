@@ -1,4 +1,4 @@
-from telesec_agent.scanning import nmap_runner
+from forgesec_agent.scanning import nmap_runner
 
 DISCOVERY_XML = (
     '<?xml version="1.0"?>\n<nmaprun><host><status state="up"/>'
@@ -98,6 +98,27 @@ def test_discovery_can_stop_managed_process(monkeypatch):
         raise AssertionError("Expected discovery cancellation")
 
 
+def test_inventory_scan_uses_fast_common_port_detection(monkeypatch):
+    commands = []
+    monkeypatch.setattr(nmap_runner, "find_nmap_executable", lambda: "nmap.exe")
+    monkeypatch.setattr(nmap_runner, "_is_windows_admin", lambda: False)
+    monkeypatch.setattr(
+        nmap_runner.subprocess,
+        "Popen",
+        lambda command, **_kwargs: commands.append(command) or SuccessfulProcess(),
+    )
+
+    nmap_runner.NmapRunner().scan_host(
+        "192.168.1.10", "inventory", cancel_requested=lambda: False
+    )
+
+    assert "--top-ports" in commands[0]
+    assert "200" in commands[0]
+    assert "--max-retries" in commands[0]
+    assert "--version-light" in commands[0]
+    assert "--version-all" not in commands[0]
+
+
 def test_standard_scan_uses_light_service_detection(monkeypatch):
     commands = []
     monkeypatch.setattr(nmap_runner, "find_nmap_executable", lambda: "nmap.exe")
@@ -113,8 +134,29 @@ def test_standard_scan_uses_light_service_detection(monkeypatch):
     )
 
     assert "--top-ports" in commands[0]
+    assert "1000" in commands[0]
     assert "--version-light" in commands[0]
     assert "--version-all" not in commands[0]
+
+
+def test_network_services_scan_uses_bounded_tcp_udp_ports(monkeypatch):
+    commands = []
+    monkeypatch.setattr(nmap_runner, "find_nmap_executable", lambda: "nmap.exe")
+    monkeypatch.setattr(nmap_runner, "_is_windows_admin", lambda: False)
+    monkeypatch.setattr(
+        nmap_runner.subprocess,
+        "Popen",
+        lambda command, **_kwargs: commands.append(command) or SuccessfulProcess(),
+    )
+
+    nmap_runner.NmapRunner().scan_host(
+        "192.168.1.10", "network_services", cancel_requested=lambda: False
+    )
+
+    assert "-sU" in commands[0]
+    assert "-sT" in commands[0]
+    assert nmap_runner.NETWORK_SERVICE_PORTS in commands[0]
+    assert "-O" not in commands[0]
 
 
 def test_full_tcp_scan_uses_all_ports_and_full_service_detection(monkeypatch):

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from telesec_agent import service
+from forgesec_agent import service
 
 
 @pytest.mark.parametrize(
@@ -12,7 +12,7 @@ from telesec_agent import service
 def test_service_install_is_upgrade_safe(monkeypatch, exists, operation):
     calls = []
     monkeypatch.setattr(service.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(service.sys, "executable", str(Path("TelesecAgent.exe")))
+    monkeypatch.setattr(service.sys, "executable", str(Path("ForgeSecAgent.exe")))
     monkeypatch.setattr(service, "_service_exists", lambda: exists)
     monkeypatch.setattr(service, "_run_sc", lambda *args: calls.append(args))
 

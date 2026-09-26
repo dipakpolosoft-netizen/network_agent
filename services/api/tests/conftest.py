@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from telesec_api.main import create_app
-from telesec_api.settings import Settings
+from forgesec_api.main import create_app
+from forgesec_api.settings import Settings
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def settings(tmp_path: Path) -> Settings:
         heartbeat_interval_seconds=30,
         agent_offline_after_seconds=90,
         command_ttl_seconds=900,
-        max_scan_targets=4096,
+        max_scan_targets=128,
         scan_concurrency=3,
         allow_public_scopes=False,
         nvd_api_key=None,

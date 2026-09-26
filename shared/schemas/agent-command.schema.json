@@ -1,18 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.telesec.local/v1/agent-command.schema.json",
-  "title": "Telesec Agent Command",
+  "$id": "https://schemas.forgesec.local/v1/agent-command.schema.json",
+  "title": "ForgeSec Agent Command",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "message_type", "command_id", "agent_id", "command_type", "created_at", "expires_at", "payload"],
   "properties": {
-    "schema_version": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/schemaVersion" },
+    "schema_version": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/schemaVersion" },
     "message_type": { "const": "agent.command" },
-    "command_id": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/uuid" },
-    "agent_id": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/uuid" },
-    "command_type": { "enum": ["health_check", "discover_network", "scan_devices", "cancel_scan"] },
-    "created_at": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" },
-    "expires_at": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" },
+    "command_id": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/uuid" },
+    "agent_id": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/uuid" },
+    "command_type": { "enum": ["health_check", "discover_network", "scan_devices", "cancel_scan", "device_diagnostic"] },
+    "created_at": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/timestamp" },
+    "expires_at": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/timestamp" },
     "payload": {
       "type": "object",
       "maxProperties": 16

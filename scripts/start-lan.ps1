@@ -51,7 +51,7 @@ $apiPid = $null
 if ($apiListener) {
     try {
         $health = Invoke-RestMethod 'http://127.0.0.1:8000/health' -TimeoutSec 3
-        $reuseApi = $health.status -eq 'ok' -and $health.service -eq 'telesec-api'
+        $reuseApi = $health.status -eq 'ok' -and $health.service -eq 'forgesec-api'
     } catch {
         $reuseApi = $false
     }
@@ -62,18 +62,18 @@ if ($apiListener) {
 }
 
 New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
-$env:TELESEC_ENV = 'development'
-$env:TELESEC_API_HOST = '127.0.0.1'
-$env:TELESEC_API_PORT = '8000'
-$env:TELESEC_WEB_ORIGIN = "http://${LanIp}:3000"
-$env:TELESEC_API_PROXY_URL = 'http://127.0.0.1:8000'
-$env:TELESEC_LAN_IP = $LanIp
-Remove-Item Env:NEXT_PUBLIC_TELESEC_API_URL -ErrorAction SilentlyContinue
-$env:NEXT_PUBLIC_TELESEC_AGENT_SERVER_URL = 'http://127.0.0.1:8000'
+$env:FORGESEC_ENV = 'development'
+$env:FORGESEC_API_HOST = '127.0.0.1'
+$env:FORGESEC_API_PORT = '8000'
+$env:FORGESEC_WEB_ORIGIN = "http://${LanIp}:3000"
+$env:FORGESEC_API_PROXY_URL = 'http://127.0.0.1:8000'
+$env:FORGESEC_LAN_IP = $LanIp
+Remove-Item Env:NEXT_PUBLIC_FORGESEC_API_URL -ErrorAction SilentlyContinue
+$env:NEXT_PUBLIC_FORGESEC_AGENT_SERVER_URL = 'http://127.0.0.1:8000'
 
 if (-not $reuseApi) {
     $api = Start-Process -FilePath $python -ArgumentList @(
-        '-m', 'uvicorn', 'telesec_api.main:app',
+        '-m', 'uvicorn', 'forgesec_api.main:app',
         '--host', '127.0.0.1', '--port', '8000'
     ) -WorkingDirectory $apiRoot -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $runRoot 'api.out.log') `
@@ -109,8 +109,8 @@ do {
 } until (($apiReady -and $webReady) -or (Get-Date) -ge $deadline)
 
 if (-not $apiReady -or -not $webReady) {
-    throw "Telesec did not become ready. Check logs in $runRoot"
+    throw "ForgeSec did not become ready. Check logs in $runRoot"
 }
 
-Write-Output "Telesec dashboard: http://${LanIp}:3000/network-agent"
-Write-Output 'Telesec API: private loopback proxy target on 127.0.0.1:8000'
+Write-Output "ForgeSec dashboard: http://${LanIp}:3000/network-agent"
+Write-Output 'ForgeSec API: private loopback proxy target on 127.0.0.1:8000'

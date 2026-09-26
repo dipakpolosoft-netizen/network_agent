@@ -8,4 +8,4 @@ $processes | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
 }
 Start-Sleep -Seconds 1
-Write-Output 'Stopped Telesec development web and API processes.'
+Write-Output 'Stopped ForgeSec development web and API processes.'

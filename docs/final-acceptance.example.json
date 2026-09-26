@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "release_scope": "v1_full_suite",
+  "customer_id": "",
+  "release_sha256": "",
+  "gates": {
+    "automated_checks": { "status": "not_tested", "evidence": "" },
+    "production_control_plane": { "status": "not_tested", "evidence": "" },
+    "customer_isolation": { "status": "not_tested", "evidence": "" },
+    "backup_restore": { "status": "not_tested", "evidence": "" },
+    "operator_access": { "status": "not_tested", "evidence": "" },
+    "scope_approval": { "status": "not_tested", "evidence": "" },
+    "package_licenses": { "status": "not_tested", "evidence": "" },
+    "clean_machine_install": { "status": "not_tested", "evidence": "" },
+    "agent_lifecycle": { "status": "not_tested", "evidence": "" },
+    "discovery_scan": { "status": "not_tested", "evidence": "" },
+    "report_evidence": { "status": "not_tested", "evidence": "" },
+    "topology_field": { "status": "not_tested", "evidence": "" },
+    "security_negative_paths": { "status": "not_tested", "evidence": "" },
+    "operations_rollback": { "status": "not_tested", "evidence": "" }
+  },
+  "workers": {
+    "nuclei": { "status": "not_tested", "evidence": "" },
+    "greenbone": { "status": "not_tested", "evidence": "" },
+    "ssh_inventory": { "status": "not_tested", "evidence": "" }
+  },
+  "signoff": {
+    "decision": "pending",
+    "approver": "",
+    "approved_at_utc": ""
+  }
+}

@@ -6,6 +6,9 @@
 # Local process IDs, logs, and temporary validation files
 .tmp/
 *.log
+.step*-tests/
+docs/pilot-plan.local.json
+docs/final-acceptance.local.json
 
 # Node.js
 node_modules/
@@ -37,6 +40,7 @@ agent_builder/installer/dependencies/*.msi
 
 # Published installer is produced by the release pipeline
 apps/web/public/downloads/agent/*.exe
+apps/web/public/downloads/agent/release.json
 !apps/web/public/downloads/agent/.gitkeep
 
 # Editors and operating systems

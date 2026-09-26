@@ -1,0 +1,16 @@
+# LLDP topology
+
+The **Assets > Topology** view is a site-scoped map of links reported by the IEEE LLDP remote-systems MIB. It is not a drawing of every IP on a subnet and does not infer a cable from ARP, ping, a shared gateway, or a route. The probe reads LLDP only from discovered hosts that respond to its existing SNMP identity request. It records the local chassis identifier, local port identifier, remote chassis identifier/subtype, remote port identifier, and remote system name. The relevant objects and remote-table index are defined in the [IEEE LLDP-MIB](https://www.ieee802.org/1/files/public/MIBs/LLDP-MIB-200505060000Z.mib).
+
+The probe sends bounded SNMPv2c read requests to the already discovered IP. `FORGESEC_SNMP_COMMUNITIES` currently defaults to `public`; for a real deployment configure an approved, read-only community and restrict device SNMP access to the probe IP. `FORGESEC_LLDP_NEIGHBOR_LIMIT` defaults to 32 rows per table and is capped at 64. SNMPv3, CDP, bridge forwarding tables, and routed-hop topology are **not** implemented in this step. These are real gaps for sites that disallow SNMPv2c or whose devices do not expose the standard LLDP MIB.
+
+The API saves the LLDP snapshot inside the durable asset observation, including the discovery ID and timestamp. A neighboring asset is resolved only when its site-local chassis ID/subtype is unique, or a MAC-form chassis ID exactly matches one unique site-local asset MAC. Duplicate or missing identities remain separate **LLDP-only neighbors** with no invented IP address. The latest successfully collected LLDP snapshot per asset is used; a successful empty snapshot removes earlier links, while a failed LLDP read does not erase prior evidence. Links older than seven days are hidden by default and can be inspected with **Show stale**. The graph response is capped at the 1,000 most recent link observations and reports truncation.
+
+## Field check
+
+1. On a written-approved pilot site, enable read-only SNMP and LLDP on two managed devices. Confirm the probe can reach UDP/161 on those exact discovered IPs and that the device's LLDP neighbor table is populated. Do not enable SNMP merely to make an empty map look complete.
+2. Run an approved discovery from that site's probe. In **Assets > Topology**, check the two devices' names, local/remote port labels, source timestamp, and discovery evidence. An unscanned LLDP neighbor may appear as unresolved; a server with no LLDP advertisement will not have a physical link drawn.
+3. Compare each mapped connection with the switch CLI or management UI. Repeat after a known, authorized topology change and confirm the new snapshot replaces the old link. Confirm a device with no LLDP access keeps the prior observation only as aged evidence.
+4. Test a second site with the same chassis text and verify it never resolves across site boundaries. Check desktop/mobile pan, zoom, node selection, asset opening, empty state, and **Show stale**.
+
+Automated tests cover parsing, site-local matching, ambiguous identities, stale links, and snapshot replacement. No live network device was contacted during Step 21 implementation, so production topology accuracy remains **not field-validated** until this check is recorded.

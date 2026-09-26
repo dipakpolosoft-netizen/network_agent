@@ -39,7 +39,7 @@ if (-not $RemoteAddress) {
     $RemoteAddress = "$network/$($localAddress.PrefixLength)"
 }
 
-$ruleName = 'Telesec-Web-LAN'
+$ruleName = 'ForgeSec-Web-LAN'
 $broadNodeRules = Get-NetFirewallRule -Enabled True -Direction Inbound -Action Allow |
     Where-Object {
         $application = $_ | Get-NetFirewallApplicationFilter
@@ -50,8 +50,8 @@ $broadNodeRules | Disable-NetFirewallRule
 Remove-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue
 New-NetFirewallRule `
     -Name $ruleName `
-    -DisplayName 'Telesec Web Dashboard (LAN)' `
-    -Description 'Allows the Telesec dashboard only from the configured local network.' `
+    -DisplayName 'ForgeSec Web Dashboard (LAN)' `
+    -Description 'Allows the ForgeSec dashboard only from the configured local network.' `
     -Direction Inbound `
     -Action Allow `
     -Protocol TCP `

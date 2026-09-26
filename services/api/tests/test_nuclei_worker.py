@@ -1,0 +1,349 @@
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from test_scan_flow import completed_discovery
+
+from forgesec_api.main import create_app
+from forgesec_api.settings import Settings
+from forgesec_api.workers.nuclei_runtime import (
+    WorkerRuntimeError,
+    _base_url,
+    build_command,
+    parse_findings,
+    run_nuclei,
+)
+
+TEMPLATE_ID = "forgesec-http-missing-x-content-type-options"
+
+
+def web_asset(client: TestClient) -> tuple[dict, dict]:
+    agent, discovery = completed_discovery(client, device_count=1)
+    scan = client.post(
+        f"/api/discoveries/{discovery['discovery_id']}/scan",
+        json={
+            "device_ids": ["selected-device-0001"],
+            "profile": "standard",
+            "authorization_confirmed": True,
+        },
+    ).json()
+    now = datetime.now(UTC).isoformat()
+    result = client.post(
+        f"/agent/scans/{scan['scan_id']}/hosts/selected-device-0001/result",
+        headers={"Authorization": f"Bearer {agent['agent_credential']}"},
+        json={
+            "schema_version": "1.0",
+            "message_type": "host_scan.result",
+            "scan_id": scan["scan_id"],
+            "agent_id": agent["agent_id"],
+            "device_id": "selected-device-0001",
+            "ip": "192.168.1.10",
+            "status": "completed",
+            "started_at": now,
+            "completed_at": now,
+            "hostname": "test-web",
+            "device_type": "server",
+            "classification_confidence": 0.9,
+            "ports": [
+                {
+                    "protocol": "tcp",
+                    "port": 8080,
+                    "state": "open",
+                    "service": "http",
+                    "product": "Example",
+                    "version": "1.0",
+                },
+                {"protocol": "tcp", "port": 22, "state": "open", "service": "ssh"},
+            ],
+            "os_matches": [],
+            "exposure_flags": [],
+            "error": None,
+        },
+    )
+    assert result.status_code == 200
+    asset = client.get("/api/assets").json()["items"][0]
+    return agent, asset
+
+
+def ready_worker(client: TestClient, site_id: str) -> dict:
+    worker = client.post(
+        "/api/workers",
+        json={
+            "site_id": site_id,
+            "label": "Nuclei worker",
+            "capabilities": ["vulnerability_assessment"],
+        },
+    ).json()
+    heartbeat = client.post(
+        "/worker/heartbeat",
+        headers={"Authorization": f"Bearer {worker['credential']}"},
+        json={
+            "schema_version": "1.0",
+            "worker_id": worker["worker_id"],
+            "version": "0.1.0-nuclei",
+            "available_capabilities": ["vulnerability_assessment"],
+        },
+    )
+    assert heartbeat.status_code == 200
+    return worker
+
+
+def test_nuclei_job_requires_observed_web_service_and_validates_evidence(
+    client: TestClient,
+) -> None:
+    agent, asset = web_asset(client)
+    site_id = client.get(f"/api/agents/{agent['agent_id']}").json()["site_id"]
+    path = "/api/worker-jobs/nuclei"
+    request = {
+        "asset_id": asset["asset_id"],
+        "port": 8080,
+        "scheme": "http",
+        "authorization_confirmed": True,
+    }
+    assert client.post(path, json=request).status_code == 409
+    worker = ready_worker(client, site_id)
+    headers = {"Authorization": f"Bearer {worker['credential']}"}
+    assert client.post(path, json={**request, "port": 22}).status_code == 409
+    assert client.post(path, json={**request, "port": 8443}).status_code == 409
+    assert (
+        client.post(
+            path, json={**request, "authorization_confirmed": False}
+        ).status_code
+        == 422
+    )
+    queued = client.post(path, json=request)
+    assert queued.status_code == 202
+    job = queued.json()
+    assert job["target_ip"] == "192.168.1.10"
+    assert job["target_port"] == 8080
+    assert job["source_asset_id"] == asset["asset_id"]
+    assert client.post(path, json=request).status_code == 409
+    assert (
+        len(
+            client.get(
+                "/api/worker-jobs", params={"asset_id": asset["asset_id"]}
+            ).json()
+        )
+        == 1
+    )
+
+    claimed = client.get("/worker/jobs/next", headers=headers).json()
+    assert claimed["job_id"] == job["job_id"]
+    assert claimed["template_profile"] == "http_baseline"
+    result = {
+        "schema_version": "1.0",
+        "lease_id": claimed["lease_id"],
+        "status": "completed",
+        "summary": "1 web configuration observation",
+        "evidence": {
+            "schema_version": "1.0",
+            "engine": "nuclei",
+            "target_url": "http://192.168.1.10:8080",
+            "template_profile": "http_baseline",
+            "findings": [
+                {
+                    "template_id": TEMPLATE_ID,
+                    "severity": "low",
+                    "title": "Missing X-Content-Type-Options header",
+                    "matched_at": "http://192.168.1.10:8080/",
+                }
+            ],
+        },
+    }
+    foreign = json.loads(json.dumps(result))
+    foreign["evidence"]["findings"][0]["matched_at"] = "http://192.168.1.99:8080/"
+    assert (
+        client.post(
+            f"/worker/jobs/{job['job_id']}/result", headers=headers, json=foreign
+        ).status_code
+        == 409
+    )
+    completed = client.post(
+        f"/worker/jobs/{job['job_id']}/result", headers=headers, json=result
+    )
+    assert completed.status_code == 200
+    detail = client.get(f"/api/worker-jobs/{job['job_id']}").json()
+    assert detail["evidence"]["findings"][0]["template_id"] == TEMPLATE_ID
+    assert "evidence" not in client.get("/api/worker-jobs").json()[0]
+
+
+def test_nuclei_job_cancels_when_asset_ip_changes(client: TestClient) -> None:
+    agent, asset = web_asset(client)
+    site_id = client.get(f"/api/agents/{agent['agent_id']}").json()["site_id"]
+    worker = ready_worker(client, site_id)
+    queued = client.post(
+        "/api/worker-jobs/nuclei",
+        json={
+            "asset_id": asset["asset_id"],
+            "port": 8080,
+            "scheme": "http",
+            "authorization_confirmed": True,
+        },
+    ).json()
+    stored = client.app.state.store.read("assets", asset["asset_id"])
+    stored["last_ip"] = "192.168.1.11"
+    client.app.state.store.write("assets", asset["asset_id"], stored)
+    assert (
+        client.get(
+            "/worker/jobs/next",
+            headers={"Authorization": f"Bearer {worker['credential']}"},
+        ).status_code
+        == 204
+    )
+    assert (
+        client.get(f"/api/worker-jobs/{queued['job_id']}").json()["status"]
+        == "cancelled"
+    )
+
+
+def test_nuclei_job_stops_if_claimed_asset_changes(client: TestClient) -> None:
+    agent, asset = web_asset(client)
+    site_id = client.get(f"/api/agents/{agent['agent_id']}").json()["site_id"]
+    worker = ready_worker(client, site_id)
+    headers = {"Authorization": f"Bearer {worker['credential']}"}
+    queued = client.post(
+        "/api/worker-jobs/nuclei",
+        json={
+            "asset_id": asset["asset_id"],
+            "port": 8080,
+            "scheme": "http",
+            "authorization_confirmed": True,
+        },
+    ).json()
+    claimed = client.get("/worker/jobs/next", headers=headers).json()
+    stored = client.app.state.store.read("assets", asset["asset_id"])
+    stored["last_ip"] = "192.168.1.11"
+    client.app.state.store.write("assets", asset["asset_id"], stored)
+    rejected = client.post(
+        f"/worker/jobs/{queued['job_id']}/result",
+        headers=headers,
+        json={
+            "schema_version": "1.0",
+            "lease_id": claimed["lease_id"],
+            "status": "failed",
+            "summary": "Target changed",
+            "evidence": {},
+        },
+    )
+    assert rejected.status_code == 409
+    detail = client.get(f"/api/worker-jobs/{queued['job_id']}").json()
+    assert detail["status"] == "cancelled"
+    assert detail["summary"] == "Source asset changed after job creation"
+
+
+def test_nuclei_enqueue_requires_operator_and_csrf(settings: Settings) -> None:
+    app = create_app(replace(settings, auth_required=True))
+    with TestClient(app) as client:
+        auth = app.state.auth_service
+        auth.create_user("viewer@example.test", "viewer password 123", "viewer")
+        auth.create_user("operator@example.test", "operator password 123", "operator")
+        payload = {
+            "asset_id": "00000000-0000-0000-0000-000000000001",
+            "port": 8080,
+            "scheme": "http",
+            "authorization_confirmed": True,
+        }
+        assert client.post("/api/worker-jobs/nuclei", json=payload).status_code == 401
+        viewer = client.post(
+            "/api/auth/login",
+            json={"email": "viewer@example.test", "password": "viewer password 123"},
+        )
+        assert viewer.status_code == 200
+        assert (
+            client.post(
+                "/api/worker-jobs/nuclei",
+                json=payload,
+                headers={"X-CSRF-Token": viewer.json()["csrf_token"]},
+            ).status_code
+            == 403
+        )
+        client.post(
+            "/api/auth/logout",
+            headers={"X-CSRF-Token": viewer.json()["csrf_token"]},
+        )
+        operator = client.post(
+            "/api/auth/login",
+            json={
+                "email": "operator@example.test",
+                "password": "operator password 123",
+            },
+        )
+        assert operator.status_code == 200
+        assert client.post("/api/worker-jobs/nuclei", json=payload).status_code == 403
+        assert (
+            client.post(
+                "/api/worker-jobs/nuclei",
+                json=payload,
+                headers={"X-CSRF-Token": operator.json()["csrf_token"]},
+            ).status_code
+            == 409
+        )
+
+
+def test_nuclei_runtime_has_fixed_template_and_rejects_foreign_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binary = tmp_path / "nuclei.exe"
+    binary.write_bytes(b"test")
+    output = tmp_path / "results.jsonl"
+    target = "http://10.10.1.4:8080"
+    command = build_command(binary, target, output)
+    assert command[command.index("-t") + 1].endswith(
+        "forgesec-http-missing-x-content-type-options.yaml"
+    )
+    assert {"-ni", "-duc", "-dr", "-or", "-rl", "-c"}.issubset(command)
+    assert "-ut" not in command
+    assert "-as" not in command
+    assert _base_url("http://127.0.0.1:8000/") == "http://127.0.0.1:8000"
+    with pytest.raises(WorkerRuntimeError):
+        _base_url("http://remote.example:8000")
+
+    output.write_text(
+        json.dumps(
+            {"template-id": TEMPLATE_ID, "matched-at": "http://10.10.1.5:8080/"}
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(WorkerRuntimeError, match="out-of-policy"):
+        parse_findings(output, target)
+
+    calls = []
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, arguments, **kwargs):
+            calls.append((arguments, kwargs))
+            file = Path(arguments[arguments.index("-jle") + 1])
+            file.write_text(
+                json.dumps({"template-id": TEMPLATE_ID, "matched-at": f"{target}/"}),
+                encoding="utf-8",
+            )
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(
+        "forgesec_api.workers.nuclei_runtime.subprocess.Popen", FakeProcess
+    )
+    evidence = run_nuclei(
+        {
+            "schema_version": "1.0",
+            "capability": "vulnerability_assessment",
+            "template_profile": "http_baseline",
+            "job_id": "00000000-0000-0000-0000-000000000001",
+            "lease_id": "00000000-0000-0000-0000-000000000002",
+            "target_ip": "10.10.1.4",
+            "target_port": 8080,
+            "target_scheme": "http",
+        },
+        binary,
+        on_tick=lambda: None,
+    )
+    assert evidence["findings"][0]["template_id"] == TEMPLATE_ID
+    assert "FORGESEC_WORKER_CREDENTIAL" not in calls[0][1]["env"]

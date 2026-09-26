@@ -14,13 +14,13 @@ VSVersionInfo(
       StringTable(
         u'040904B0',
         [
-          StringStruct(u'CompanyName', u'Telesec'),
-          StringStruct(u'FileDescription', u'Telesec Network Agent'),
+          StringStruct(u'CompanyName', u'ForgeSec'),
+          StringStruct(u'FileDescription', u'ForgeSec Network Agent'),
           StringStruct(u'FileVersion', u'0.1.0'),
-          StringStruct(u'InternalName', u'TelesecAgent'),
-          StringStruct(u'LegalCopyright', u'Copyright Telesec'),
-          StringStruct(u'OriginalFilename', u'TelesecAgent.exe'),
-          StringStruct(u'ProductName', u'Telesec Network Agent'),
+          StringStruct(u'InternalName', u'ForgeSecAgent'),
+          StringStruct(u'LegalCopyright', u'Copyright ForgeSec'),
+          StringStruct(u'OriginalFilename', u'ForgeSecAgent.exe'),
+          StringStruct(u'ProductName', u'ForgeSec Network Agent'),
           StringStruct(u'ProductVersion', u'0.1.0')
         ]
       )

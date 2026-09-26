@@ -1,16 +1,17 @@
 import type { NextConfig } from "next";
 
 const apiProxyUrl = (
-  process.env.TELESEC_API_PROXY_URL ?? "http://127.0.0.1:8000"
+  process.env.FORGESEC_API_PROXY_URL ?? "http://127.0.0.1:8000"
 ).replace(/\/+$/, "");
 const allowedDevOrigins = [
   "localhost",
   "127.0.0.1",
-  ...(process.env.TELESEC_LAN_IP ? [process.env.TELESEC_LAN_IP] : []),
+  ...(process.env.FORGESEC_LAN_IP ? [process.env.FORGESEC_LAN_IP] : []),
 ];
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  devIndicators: false,
   allowedDevOrigins,
   experimental: {
     cpus: 1,

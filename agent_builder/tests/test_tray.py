@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
-from telesec_agent.config import dashboard_url_for_server
-from telesec_agent.tray import collect_snapshot, status_icon_pixels
+from forgesec_agent.config import dashboard_url_for_server
+from forgesec_agent.tray import collect_snapshot, status_icon_pixels
 
 NOW = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
 
@@ -86,8 +86,8 @@ def test_local_dashboard_url_uses_web_port():
     assert dashboard_url_for_server("http://127.0.0.1:8000") == (
         "http://127.0.0.1:3000/network-agent"
     )
-    assert dashboard_url_for_server("https://telesec.example/api") == (
-        "https://telesec.example/network-agent"
+    assert dashboard_url_for_server("https://forgesec.example/api") == (
+        "https://forgesec.example/network-agent"
     )
 
 

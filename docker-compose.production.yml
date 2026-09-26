@@ -1,0 +1,20 @@
+services:
+  caddy:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    environment:
+      FORGESEC_PUBLIC_HOST: ${FORGESEC_PUBLIC_HOST:?Set FORGESEC_PUBLIC_HOST in .env}
+    ports:
+      - "${FORGESEC_INGRESS_BIND_ADDRESS:-0.0.0.0}:80:80"
+      - "${FORGESEC_INGRESS_BIND_ADDRESS:-0.0.0.0}:443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - forgesec-caddy-data:/data
+      - forgesec-caddy-config:/config
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  forgesec-caddy-data:
+  forgesec-caddy-config:

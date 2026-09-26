@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.telesec.local/v1/common.schema.json",
-  "title": "Telesec Common Types",
+  "$id": "https://schemas.forgesec.local/v1/common.schema.json",
+  "title": "ForgeSec Common Types",
   "$defs": {
     "schemaVersion": {
       "type": "string",

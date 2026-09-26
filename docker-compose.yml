@@ -1,26 +1,49 @@
-name: telesec
+name: ${FORGESEC_COMPOSE_PROJECT:-forgesec}
 
 services:
+  postgres:
+    image: postgres:17@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
+    environment:
+      POSTGRES_DB: forgesec
+      POSTGRES_USER: forgesec
+      POSTGRES_PASSWORD: ${FORGESEC_POSTGRES_PASSWORD:?Set FORGESEC_POSTGRES_PASSWORD in .env}
+    volumes:
+      - forgesec-postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forgesec -d forgesec"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   api:
     build:
       context: ./services/api
     environment:
-      TELESEC_ENV: production
-      TELESEC_API_HOST: 0.0.0.0
-      TELESEC_API_PORT: 8000
-      TELESEC_RUNTIME_DATA_DIR: /var/lib/telesec
-      TELESEC_WEB_ORIGIN: ${TELESEC_WEB_ORIGIN:-http://127.0.0.1:3000}
-      TELESEC_ENROLLMENT_TTL_SECONDS: ${TELESEC_ENROLLMENT_TTL_SECONDS:-900}
-      TELESEC_HEARTBEAT_INTERVAL_SECONDS: ${TELESEC_HEARTBEAT_INTERVAL_SECONDS:-30}
-      TELESEC_AGENT_OFFLINE_AFTER_SECONDS: ${TELESEC_AGENT_OFFLINE_AFTER_SECONDS:-90}
-      TELESEC_COMMAND_TTL_SECONDS: ${TELESEC_COMMAND_TTL_SECONDS:-900}
-      TELESEC_MAX_SCAN_TARGETS: 4096
-      TELESEC_SCAN_CONCURRENCY: 3
-      TELESEC_ALLOW_PUBLIC_SCOPES: "false"
+      FORGESEC_ENV: production
+      FORGESEC_CUSTOMER_ID: ${FORGESEC_CUSTOMER_ID:?Set a unique customer slug in .env}
+      FORGESEC_ADOPT_LEGACY_CUSTOMER_DATA: ${FORGESEC_ADOPT_LEGACY_CUSTOMER_DATA:-false}
+      FORGESEC_API_HOST: 0.0.0.0
+      FORGESEC_API_PORT: 8000
+      FORGESEC_RUNTIME_DATA_DIR: /var/lib/forgesec
+      FORGESEC_DATABASE_URL: ${FORGESEC_DATABASE_URL:?Set FORGESEC_DATABASE_URL in .env}
+      FORGESEC_AUTH_REQUIRED: "true"
+      FORGESEC_WEB_ORIGIN: ${FORGESEC_WEB_ORIGIN:-http://127.0.0.1:3000}
+      FORGESEC_NVD_API_KEY: ${FORGESEC_NVD_API_KEY:-}
+      FORGESEC_ENROLLMENT_TTL_SECONDS: ${FORGESEC_ENROLLMENT_TTL_SECONDS:-900}
+      FORGESEC_HEARTBEAT_INTERVAL_SECONDS: ${FORGESEC_HEARTBEAT_INTERVAL_SECONDS:-30}
+      FORGESEC_AGENT_OFFLINE_AFTER_SECONDS: ${FORGESEC_AGENT_OFFLINE_AFTER_SECONDS:-90}
+      FORGESEC_COMMAND_TTL_SECONDS: ${FORGESEC_COMMAND_TTL_SECONDS:-900}
+      FORGESEC_MAX_SCAN_TARGETS: 4096
+      FORGESEC_SCAN_CONCURRENCY: 3
+      FORGESEC_ALLOW_PUBLIC_SCOPES: "false"
     ports:
-      - "127.0.0.1:${TELESEC_API_PORT:-8000}:8000"
+      - "127.0.0.1:${FORGESEC_API_PORT:-8000}:8000"
     volumes:
-      - telesec-runtime:/var/lib/telesec
+      - forgesec-runtime:/var/lib/forgesec
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
@@ -33,12 +56,13 @@ services:
     build:
       context: ./apps/web
       args:
-        TELESEC_API_PROXY_URL: ${TELESEC_API_PROXY_URL:-http://api:8000}
+        FORGESEC_API_PROXY_URL: ${FORGESEC_API_PROXY_URL:-http://api:8000}
+        NEXT_PUBLIC_FORGESEC_AGENT_SERVER_URL: ${NEXT_PUBLIC_FORGESEC_AGENT_SERVER_URL:-http://127.0.0.1:8000}
     environment:
       HOSTNAME: 0.0.0.0
       PORT: 3000
     ports:
-      - "${TELESEC_BIND_ADDRESS:-127.0.0.1}:${TELESEC_WEB_PORT:-3000}:3000"
+      - "${FORGESEC_BIND_ADDRESS:-127.0.0.1}:${FORGESEC_WEB_PORT:-3000}:3000"
     depends_on:
       api:
         condition: service_healthy
@@ -51,4 +75,5 @@ services:
       start_period: 10s
 
 volumes:
-  telesec-runtime:
+  forgesec-postgres:
+  forgesec-runtime:

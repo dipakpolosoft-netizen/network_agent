@@ -1,7 +1,7 @@
 import logging
 from pathlib import Path
 
-from telesec_agent import logging_setup
+from forgesec_agent import logging_setup
 
 
 def test_logging_uses_system_temp_when_agent_log_is_not_writable(
@@ -25,5 +25,5 @@ def test_logging_uses_system_temp_when_agent_log_is_not_writable(
 
     assert attempts == [
         tmp_path / "agent" / "agent.log",
-        fallback_root / "Telesec" / "NetworkAgent" / "agent.log",
+        fallback_root / "ForgeSec" / "NetworkAgent" / "agent.log",
     ]

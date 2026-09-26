@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
-from telesec_api.settings import Settings
+from forgesec_api.settings import Settings
 
 
 def enrollment(client: TestClient) -> dict:

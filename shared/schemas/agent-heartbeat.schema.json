@@ -1,26 +1,26 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.telesec.local/v1/agent-heartbeat.schema.json",
-  "title": "Telesec Agent Heartbeat",
+  "$id": "https://schemas.forgesec.local/v1/agent-heartbeat.schema.json",
+  "title": "ForgeSec Agent Heartbeat",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "message_type", "agent_id", "agent_version", "hostname", "os_name", "service_status", "npcap_status", "sent_at"],
   "properties": {
-    "schema_version": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/schemaVersion" },
+    "schema_version": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/schemaVersion" },
     "message_type": { "const": "agent.heartbeat" },
-    "agent_id": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/uuid" },
+    "agent_id": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/uuid" },
     "agent_version": { "type": "string", "minLength": 1, "maxLength": 64 },
     "hostname": { "type": "string", "minLength": 1, "maxLength": 255 },
     "os_name": { "type": "string", "minLength": 1, "maxLength": 255 },
     "local_ip": {
       "oneOf": [
-        { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/ipv4" },
+        { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/ipv4" },
         { "type": "null" }
       ]
     },
     "subnet": {
       "oneOf": [
-        { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" },
+        { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/cidr" },
         { "type": "null" }
       ]
     },
@@ -29,7 +29,7 @@
     "discovery_ready": { "type": ["boolean", "null"] },
     "discovery_network": {
       "oneOf": [
-        { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" },
+        { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/cidr" },
         { "type": "null" }
       ]
     },
@@ -43,11 +43,11 @@
       "type": "array",
       "maxItems": 256,
       "uniqueItems": true,
-      "items": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" }
+      "items": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/cidr" }
     },
     "discovery_recommended_scope": {
       "anyOf": [
-        { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" },
+        { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/cidr" },
         { "type": "null" }
       ]
     },
@@ -56,11 +56,11 @@
     "service_status": { "enum": ["online", "busy", "degraded", "offline"] },
     "current_command_id": {
       "oneOf": [
-        { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/uuid" },
+        { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/uuid" },
         { "type": "null" }
       ]
     },
-    "sent_at": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" }
+    "sent_at": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/timestamp" }
   }
 }
 

@@ -1,4 +1,4 @@
-"""Perform dependency-free structural checks on Telesec schema documents."""
+"""Perform dependency-free structural checks on ForgeSec schema documents."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def main() -> int:
             if referenced_id not in documents:
                 raise SystemExit(f"{path.name}: unresolved schema reference {reference}")
 
-    print(f"Validated {len(paths)} Telesec schema documents")
+    print(f"Validated {len(paths)} ForgeSec schema documents")
     return 0
 
 

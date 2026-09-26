@@ -4,10 +4,10 @@ import threading
 import time
 from pathlib import Path
 
-from telesec_agent.config import AgentPaths
-from telesec_agent.enrollment import AgentIdentity
-from telesec_agent.job_scheduler import ScanScheduler
-from telesec_agent.storage import AgentStorage
+from forgesec_agent.config import AgentPaths
+from forgesec_agent.enrollment import AgentIdentity
+from forgesec_agent.job_scheduler import ScanScheduler
+from forgesec_agent.storage import AgentStorage
 
 HOST_XML = """<?xml version="1.0"?>
 <nmaprun scanner="nmap">
@@ -78,7 +78,7 @@ def test_scheduler_never_exceeds_three_workers(tmp_path: Path) -> None:
     scheduler = ScanScheduler(scanner, storage, paths.root / "scans")
     identity = AgentIdentity(
         agent_id="00000000-0000-0000-0000-000000000123",
-        server_url="https://telesec.example.com",
+        server_url="https://forgesec.example.com",
         credential="tes_agent_secret",
         heartbeat_interval_seconds=30,
         enrolled_at="2026-07-23T10:00:00Z",

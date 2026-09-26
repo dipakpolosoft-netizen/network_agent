@@ -1,0 +1,40 @@
+{
+  "site": {
+    "name": "",
+    "owner": ""
+  },
+  "approval": {
+    "confirmed": false,
+    "reference": "",
+    "approved_by": "",
+    "expires_on": "",
+    "approved_cidr": "",
+    "discovery_cidr": "",
+    "exclusions": [],
+    "profiles": ["inventory", "standard"],
+    "public_range_authorized": false
+  },
+  "probe": {
+    "machine_name": "",
+    "placement": "separate_windows_pc_or_vm",
+    "ipv4": ""
+  },
+  "server": {
+    "dashboard_url": "",
+    "agent_api_url": ""
+  },
+  "known_devices": [
+    {
+      "name": "",
+      "device_type": "",
+      "ipv4": "",
+      "expected_tcp_ports": []
+    },
+    {
+      "name": "",
+      "device_type": "",
+      "ipv4": "",
+      "expected_tcp_ports": []
+    }
+  ]
+}

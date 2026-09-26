@@ -30,6 +30,14 @@ def authenticated_agent(client: TestClient) -> dict:
         json=heartbeat,
     )
     assert response.status_code == 200
+    site_id = client.get("/api/agents").json()[0]["site_id"]
+    scopes = client.get(f"/api/sites/{site_id}/scopes").json()
+    if not any(item["cidr"] == "192.168.1.0/24" for item in scopes):
+        approved = client.post(
+            f"/api/sites/{site_id}/scopes",
+            json={"cidr": "192.168.1.0/24", "label": "Test LAN"},
+        )
+        assert approved.status_code == 201
     return enrolled
 
 
@@ -248,6 +256,24 @@ def test_failed_command_updates_discovery_terminal_state(client: TestClient) -> 
     assert terminal["events"][-1]["stage"] == "failed"
 
 
+def test_queued_discovery_expires_without_probe_polling(client: TestClient) -> None:
+    agent = authenticated_agent(client)
+    created = client.post(
+        f"/api/agents/{agent['agent_id']}/discover",
+        json={"authorization_confirmed": True},
+    ).json()
+    store = client.app.state.store
+    command = store.read("commands", created["command_id"])
+    command["expires_at"] = "2020-01-01T00:00:00Z"
+    store.write("commands", created["command_id"], command)
+
+    discovery = client.get(f"/api/discoveries/{created['discovery_id']}").json()
+    assert discovery["status"] == "failed"
+    assert discovery["error"] == "Command expired before the agent claimed it"
+    assert discovery["completed_at"] is not None
+    assert store.read("commands", created["command_id"])["status"] == "expired"
+
+
 def test_queued_discovery_can_be_cancelled(client: TestClient) -> None:
     agent = authenticated_agent(client)
     authorization = {"Authorization": f"Bearer {agent['agent_credential']}"}
@@ -273,6 +299,12 @@ def test_queued_discovery_can_be_cancelled(client: TestClient) -> None:
 
 
 def public_slash_22_heartbeat(client: TestClient, agent: dict) -> None:
+    site_id = client.get("/api/agents").json()[0]["site_id"]
+    approved = client.post(
+        f"/api/sites/{site_id}/scopes",
+        json={"cidr": "172.168.0.0/22", "label": "Authorized test range"},
+    )
+    assert approved.status_code == 201
     response = client.post(
         "/agent/heartbeat",
         headers={"Authorization": f"Bearer {agent['agent_credential']}"},

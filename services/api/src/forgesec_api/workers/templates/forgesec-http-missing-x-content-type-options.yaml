@@ -1,0 +1,20 @@
+id: forgesec-http-missing-x-content-type-options
+
+info:
+  name: Missing X-Content-Type-Options header
+  author: forgesec
+  severity: low
+  description: The HTTP response did not include X-Content-Type-Options.
+  tags: forgesec,misconfiguration
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}"
+    redirects: false
+    matchers:
+      - type: dsl
+        dsl:
+          - "status_code >= 200 && status_code < 300"
+          - "!regex('(?i)x-content-type-options:', header)"
+        condition: and

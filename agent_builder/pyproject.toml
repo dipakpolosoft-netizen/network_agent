@@ -3,9 +3,9 @@ requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [project]
-name = "telesec-network-agent"
+name = "forgesec-network-agent"
 version = "0.1.0"
-description = "Native Windows network agent for Telesec"
+description = "Native Windows network agent for ForgeSec"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "psutil>=7.2,<8",
@@ -22,10 +22,10 @@ build = [
 ]
 
 [project.scripts]
-telesec-agent = "telesec_agent.main:main"
+forgesec-agent = "forgesec_agent.main:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/telesec_agent"]
+packages = ["src/forgesec_agent"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

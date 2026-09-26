@@ -1,0 +1,77 @@
+"""Long-running service loop; command claiming is added in the next phase."""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from typing import Any, Protocol
+
+from forgesec_agent.api_client import ApiClientError, ForgeSecApiClient
+from forgesec_agent.config import ConfigurationError
+from forgesec_agent.enrollment import AgentIdentity, EnrollmentManager
+from forgesec_agent.heartbeat import HeartbeatSender
+
+LOGGER = logging.getLogger(__name__)
+
+
+class CommandHandler(Protocol):
+    def handle(
+        self,
+        command: dict[str, Any],
+        identity: AgentIdentity,
+        client: ForgeSecApiClient,
+    ) -> None: ...
+
+
+class AgentLoop:
+    def __init__(
+        self,
+        enrollment: EnrollmentManager,
+        heartbeat: HeartbeatSender,
+        command_handler: CommandHandler,
+        stop_event: threading.Event,
+    ):
+        self.enrollment = enrollment
+        self.heartbeat = heartbeat
+        self.command_handler = command_handler
+        self.stop_event = stop_event
+
+    def run(self) -> None:
+        next_heartbeat_at = 0.0
+        identity: AgentIdentity | None = None
+        while not self.stop_event.is_set():
+            try:
+                identity = self.enrollment.ensure_enrolled()
+                client = ForgeSecApiClient(identity.server_url)
+                identity = self.enrollment.rotate_if_due(identity, client)
+                now = time.monotonic()
+                if now >= next_heartbeat_at:
+                    self.heartbeat.send(identity, client=client)
+                    next_heartbeat_at = now + identity.heartbeat_interval_seconds
+                command = client.next_command(credential=identity.credential)
+                if command is not None:
+                    self.command_handler.handle(command, identity, client)
+                    next_heartbeat_at = 0.0
+                    delay = 0.1
+                else:
+                    delay = 3
+            except (ApiClientError, ConfigurationError, OSError, ValueError) as exc:
+                LOGGER.warning("Agent cycle failed: %s", exc)
+                self.heartbeat.record_error(str(exc))
+                delay = 15
+            except Exception:
+                LOGGER.exception("Agent command failed")
+                self.heartbeat.record_error("Unexpected agent command failure")
+                delay = 5
+            self.stop_event.wait(delay)
+        if identity is not None:
+            try:
+                client = ForgeSecApiClient(identity.server_url, timeout_seconds=5.0)
+                self.heartbeat.send(
+                    identity,
+                    service_status="offline",
+                    client=client,
+                )
+            except Exception as exc:
+                LOGGER.warning("Unable to report final offline status: %s", exc)

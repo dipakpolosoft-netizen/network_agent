@@ -12,20 +12,20 @@ from unittest.mock import patch
 from urllib.request import Request, urlopen
 
 import uvicorn
-from telesec_api.main import create_app
-from telesec_api.settings import Settings
+from forgesec_api.main import create_app
+from forgesec_api.settings import Settings
 
-from telesec_agent.api_client import TelesecApiClient
-from telesec_agent.config import AgentPaths
-from telesec_agent.enrollment import EnrollmentManager, IdentityStore
-from telesec_agent.heartbeat import HeartbeatSender
-from telesec_agent.job_scheduler import ScanScheduler
-from telesec_agent.scanning.discovery import DiscoveryCommandHandler
-from telesec_agent.scanning.interfaces import InterfaceScope, ResolvedDiscoveryPlan
-from telesec_agent.scanning.nmap_runner import DiscoveryProgress
-from telesec_agent.scanning.scan import ScanCommandHandler
-from telesec_agent.security.dpapi import DpapiProtector
-from telesec_agent.storage import AgentStorage
+from forgesec_agent.api_client import ForgeSecApiClient
+from forgesec_agent.config import AgentPaths
+from forgesec_agent.enrollment import EnrollmentManager, IdentityStore
+from forgesec_agent.heartbeat import HeartbeatSender
+from forgesec_agent.job_scheduler import ScanScheduler
+from forgesec_agent.scanning.discovery import DiscoveryCommandHandler
+from forgesec_agent.scanning.interfaces import InterfaceScope, ResolvedDiscoveryPlan
+from forgesec_agent.scanning.nmap_runner import DiscoveryProgress
+from forgesec_agent.scanning.scan import ScanCommandHandler
+from forgesec_agent.security.dpapi import DpapiProtector
+from forgesec_agent.storage import AgentStorage
 
 DISCOVERY_XML = """<?xml version="1.0"?>
 <nmaprun scanner="nmap">
@@ -100,7 +100,7 @@ def request_json(url: str, payload: dict | None = None) -> dict | list:
 
 
 def main() -> int:
-    with TemporaryDirectory(prefix="telesec-smoke-") as temporary:
+    with TemporaryDirectory(prefix="forgesec-smoke-") as temporary:
         root = Path(temporary)
         settings = Settings(
             environment="test",
@@ -133,7 +133,7 @@ def main() -> int:
                     break
                 time.sleep(0.1)
             if not server.started:
-                raise RuntimeError("Telesec API did not start")
+                raise RuntimeError("ForgeSec API did not start")
 
             server_url = f"http://127.0.0.1:{port}"
             enrollment = request_json(
@@ -141,6 +141,13 @@ def main() -> int:
                 {"label": "Integration Agent", "site_name": "Test Site"},
             )
             assert isinstance(enrollment, dict)
+            sites = request_json(f"{server_url}/api/sites")
+            assert isinstance(sites, list) and len(sites) == 1
+            approved_scope = request_json(
+                f"{server_url}/api/sites/{sites[0]['site_id']}/scopes",
+                {"cidr": "192.168.1.0/24", "label": "Smoke test LAN"},
+            )
+            assert isinstance(approved_scope, dict)
 
             paths = AgentPaths(root / "agent")
             storage = AgentStorage(paths)
@@ -155,7 +162,7 @@ def main() -> int:
             identities = IdentityStore(storage, paths, DpapiProtector())
             identity = EnrollmentManager(storage, paths, identities).ensure_enrolled()
             with patch(
-                "telesec_agent.heartbeat.discovery_scope",
+                "forgesec_agent.heartbeat.discovery_scope",
                 return_value={
                     "ready": True,
                     "network": "192.168.1.0/24",
@@ -176,7 +183,7 @@ def main() -> int:
                 {"authorization_confirmed": True},
             )
             assert isinstance(discovery, dict)
-            agent_client = TelesecApiClient(server_url)
+            agent_client = ForgeSecApiClient(server_url)
             command = agent_client.next_command(credential=identity.credential)
             assert command is not None
             scope = InterfaceScope(
@@ -237,6 +244,10 @@ def main() -> int:
             assert result["status"] == "completed"
             assert result["completed"] == 1
             assert len(result["results"]) == 1
+            assert result["summary"]["open_ports"] == 1
+            assert result["change_summary"]["baseline_scan_id"] is None
+            assert 0 <= result["action_summary"]["risk_score"] <= 100
+            assert result["action_summary"]["priority_actions"]
             print(
                 f"Integrated agent {identity.agent_id}: online, "
                 f"{discovery_result['device_count']} devices discovered, "

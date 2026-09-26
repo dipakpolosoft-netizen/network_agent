@@ -1,22 +1,22 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.telesec.local/v1/host-scan-result.schema.json",
-  "title": "Telesec Host Scan Result",
+  "$id": "https://schemas.forgesec.local/v1/host-scan-result.schema.json",
+  "title": "ForgeSec Host Scan Result",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "message_type", "scan_id", "agent_id", "device_id", "ip", "status", "started_at", "ports", "os_matches", "exposure_flags"],
   "properties": {
-    "schema_version": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/schemaVersion" },
+    "schema_version": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/schemaVersion" },
     "message_type": { "const": "host_scan.result" },
-    "scan_id": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/uuid" },
-    "agent_id": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/uuid" },
+    "scan_id": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/uuid" },
+    "agent_id": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/uuid" },
     "device_id": { "type": "string", "minLength": 8, "maxLength": 128 },
-    "ip": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/ipv4" },
+    "ip": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/ipv4" },
     "status": { "enum": ["completed", "partial", "failed", "timed_out", "cancelled"] },
-    "started_at": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" },
+    "started_at": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/timestamp" },
     "completed_at": {
       "oneOf": [
-        { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" },
+        { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/timestamp" },
         { "type": "null" }
       ]
     },
@@ -49,10 +49,21 @@
         "protocol": { "enum": ["tcp", "udp"] },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "state": { "enum": ["open", "open|filtered", "filtered"] },
+        "reason": { "type": ["string", "null"], "maxLength": 128 },
         "service": { "type": ["string", "null"], "maxLength": 128 },
         "product": { "type": ["string", "null"], "maxLength": 255 },
         "version": { "type": ["string", "null"], "maxLength": 255 },
-        "cpe": { "type": ["string", "null"], "maxLength": 1024 }
+        "extrainfo": { "type": ["string", "null"], "maxLength": 512 },
+        "ostype": { "type": ["string", "null"], "maxLength": 128 },
+        "devicetype": { "type": ["string", "null"], "maxLength": 128 },
+        "method": { "type": ["string", "null"], "maxLength": 64 },
+        "confidence": { "type": ["integer", "null"], "minimum": 0, "maximum": 10 },
+        "cpe": { "type": ["string", "null"], "maxLength": 1024 },
+        "cpes": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 1024 },
+          "maxItems": 16
+        }
       }
     },
     "osMatch": {

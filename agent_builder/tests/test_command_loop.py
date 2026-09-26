@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import threading
 
-from telesec_agent import command_loop
-from telesec_agent.command_loop import AgentLoop
-from telesec_agent.config import ConfigurationError
-from telesec_agent.enrollment import AgentIdentity
+from forgesec_agent import command_loop
+from forgesec_agent.command_loop import AgentLoop
+from forgesec_agent.config import ConfigurationError
+from forgesec_agent.enrollment import AgentIdentity
 
 
 def test_agent_reports_offline_when_loop_stops(monkeypatch):
     stop_event = threading.Event()
     identity = AgentIdentity(
         agent_id="00000000-0000-0000-0000-000000000123",
-        server_url="https://telesec.example.com",
+        server_url="https://forgesec.example.com",
         credential="tes_agent_secret",
         heartbeat_interval_seconds=30,
         enrolled_at="2026-07-23T10:00:00Z",
@@ -23,6 +23,10 @@ def test_agent_reports_offline_when_loop_stops(monkeypatch):
         @staticmethod
         def ensure_enrolled():
             return identity
+
+        @staticmethod
+        def rotate_if_due(current, _client):
+            return current
 
     class Heartbeat:
         @staticmethod
@@ -40,7 +44,7 @@ def test_agent_reports_offline_when_loop_stops(monkeypatch):
             stop_event.set()
             return None
 
-    monkeypatch.setattr(command_loop, "TelesecApiClient", Client)
+    monkeypatch.setattr(command_loop, "ForgeSecApiClient", Client)
     loop = AgentLoop(Enrollment(), Heartbeat(), object(), stop_event)
 
     loop.run()

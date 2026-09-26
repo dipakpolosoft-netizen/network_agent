@@ -1,28 +1,28 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.telesec.local/v1/discovery-result.schema.json",
-  "title": "Telesec Discovery Result",
+  "$id": "https://schemas.forgesec.local/v1/discovery-result.schema.json",
+  "title": "ForgeSec Discovery Result",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "message_type", "discovery_id", "agent_id", "network", "status", "started_at", "devices"],
   "properties": {
-    "schema_version": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/schemaVersion" },
+    "schema_version": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/schemaVersion" },
     "message_type": { "const": "discovery.result" },
-    "discovery_id": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/uuid" },
-    "agent_id": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/uuid" },
-    "network": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" },
+    "discovery_id": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/uuid" },
+    "agent_id": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/uuid" },
+    "network": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/cidr" },
     "interface_name": { "type": ["string", "null"], "maxLength": 255 },
     "status": { "enum": ["completed", "partial", "failed", "cancelled"] },
-    "started_at": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" },
+    "started_at": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/timestamp" },
     "completed_at": {
       "oneOf": [
-        { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" },
+        { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/timestamp" },
         { "type": "null" }
       ]
     },
     "devices": {
       "type": "array",
-      "items": { "$ref": "https://schemas.telesec.local/v1/discovered-device.schema.json" },
+      "items": { "$ref": "https://schemas.forgesec.local/v1/discovered-device.schema.json" },
       "maxItems": 4096
     },
     "error": { "type": ["string", "null"], "maxLength": 2048 },
@@ -30,19 +30,19 @@
       "type": "array",
       "maxItems": 256,
       "uniqueItems": true,
-      "items": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" }
+      "items": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/cidr" }
     },
     "completed_scopes": {
       "type": "array",
       "maxItems": 256,
       "uniqueItems": true,
-      "items": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" }
+      "items": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/cidr" }
     },
     "failed_scopes": {
       "type": "array",
       "maxItems": 256,
       "uniqueItems": true,
-      "items": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" }
+      "items": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/cidr" }
     }
   }
 }

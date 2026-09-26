@@ -1,27 +1,78 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.telesec.local/v1/discovered-device.schema.json",
-  "title": "Telesec Discovered Device",
+  "$id": "https://schemas.forgesec.local/v1/discovered-device.schema.json",
+  "title": "ForgeSec Discovered Device",
   "type": "object",
   "additionalProperties": false,
   "required": ["device_id", "ip", "status", "discovery_reason", "is_agent", "first_seen", "last_seen"],
   "properties": {
     "device_id": { "type": "string", "minLength": 8, "maxLength": 128 },
-    "ip": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/ipv4" },
+    "ip": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/ipv4" },
     "hostname": { "type": ["string", "null"], "maxLength": 255 },
-    "mac": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/macAddress" },
+    "mac": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/macAddress" },
     "vendor": { "type": ["string", "null"], "maxLength": 255 },
+    "snmp_name": { "type": ["string", "null"], "maxLength": 255 },
+    "snmp_description": { "type": ["string", "null"], "maxLength": 512 },
+    "snmp_object_id": { "type": ["string", "null"], "maxLength": 255 },
+    "snmp_contact": { "type": ["string", "null"], "maxLength": 255 },
+    "snmp_location": { "type": ["string", "null"], "maxLength": 255 },
+    "snmp_uptime_seconds": { "type": ["integer", "null"], "minimum": 0 },
+    "snmp_interface_count": { "type": ["integer", "null"], "minimum": 0 },
+    "snmp_interfaces": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/snmpInterface" },
+      "maxItems": 256
+    },
+    "lldp_chassis_subtype": { "type": ["integer", "null"], "minimum": 1, "maximum": 7 },
+    "lldp_chassis_id": { "type": ["string", "null"], "pattern": "^(?:[0-9a-f]{2}){1,255}$" },
+    "lldp_collected": { "type": "boolean" },
+    "lldp_neighbors": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/lldpNeighbor" },
+      "maxItems": 64
+    },
+    "device_type": { "type": ["string", "null"], "maxLength": 64 },
+    "classification_confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
     "status": { "const": "up" },
     "discovery_reason": { "type": "string", "minLength": 1, "maxLength": 128 },
     "latency_ms": { "type": ["number", "null"], "minimum": 0 },
     "is_agent": { "type": "boolean" },
-    "first_seen": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" },
-    "last_seen": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" },
+    "first_seen": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/timestamp" },
+    "last_seen": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/timestamp" },
     "discovery_scope": {
       "anyOf": [
-        { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/cidr" },
+        { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/cidr" },
         { "type": "null" }
       ]
+    }
+  },
+  "$defs": {
+    "lldpNeighbor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local_port", "remote_chassis_subtype", "remote_chassis_id"],
+      "properties": {
+        "local_port": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "remote_chassis_subtype": { "type": "integer", "minimum": 1, "maximum": 7 },
+        "remote_chassis_id": { "type": "string", "pattern": "^(?:[0-9a-f]{2}){1,255}$" },
+        "remote_port": { "type": ["string", "null"], "maxLength": 255 },
+        "remote_system_name": { "type": ["string", "null"], "maxLength": 255 }
+      }
+    },
+    "snmpInterface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "name": { "type": ["string", "null"], "maxLength": 255 },
+        "description": { "type": ["string", "null"], "maxLength": 255 },
+        "interface_type": { "type": ["string", "null"], "maxLength": 64 },
+        "admin_status": { "type": ["string", "null"], "maxLength": 64 },
+        "oper_status": { "type": ["string", "null"], "maxLength": 64 },
+        "speed_mbps": { "type": ["number", "null"], "minimum": 0 },
+        "alias": { "type": ["string", "null"], "maxLength": 255 }
+      }
     }
   }
 }

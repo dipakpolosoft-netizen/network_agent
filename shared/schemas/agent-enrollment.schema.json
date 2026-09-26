@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.telesec.local/v1/agent-enrollment.schema.json",
-  "title": "Telesec Agent Enrollment",
+  "$id": "https://schemas.forgesec.local/v1/agent-enrollment.schema.json",
+  "title": "ForgeSec Agent Enrollment",
   "oneOf": [
     { "$ref": "#/$defs/request" },
     { "$ref": "#/$defs/response" }
@@ -12,14 +12,14 @@
       "additionalProperties": false,
       "required": ["schema_version", "message_type", "enrollment_token", "agent_version", "hostname", "os_name", "architecture", "requested_at"],
       "properties": {
-        "schema_version": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/schemaVersion" },
+        "schema_version": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/schemaVersion" },
         "message_type": { "const": "agent.enroll.request" },
         "enrollment_token": { "type": "string", "minLength": 32, "maxLength": 512 },
         "agent_version": { "type": "string", "minLength": 1, "maxLength": 64 },
         "hostname": { "type": "string", "minLength": 1, "maxLength": 255 },
         "os_name": { "type": "string", "minLength": 1, "maxLength": 255 },
         "architecture": { "enum": ["x86_64", "arm64"] },
-        "requested_at": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" }
+        "requested_at": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/timestamp" }
       }
     },
     "response": {
@@ -27,12 +27,12 @@
       "additionalProperties": false,
       "required": ["schema_version", "message_type", "agent_id", "agent_credential", "heartbeat_interval_seconds", "issued_at"],
       "properties": {
-        "schema_version": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/schemaVersion" },
+        "schema_version": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/schemaVersion" },
         "message_type": { "const": "agent.enroll.response" },
-        "agent_id": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/uuid" },
+        "agent_id": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/uuid" },
         "agent_credential": { "type": "string", "minLength": 32, "maxLength": 1024 },
         "heartbeat_interval_seconds": { "type": "integer", "minimum": 10, "maximum": 300 },
-        "issued_at": { "$ref": "https://schemas.telesec.local/v1/common.schema.json#/$defs/timestamp" }
+        "issued_at": { "$ref": "https://schemas.forgesec.local/v1/common.schema.json#/$defs/timestamp" }
       }
     }
   }
