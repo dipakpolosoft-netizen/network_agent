@@ -15,6 +15,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = ["docker", "compose", "-f", "docker-compose.yml"]
+POSTGRES_RESTORE_IMAGE = (
+    "postgres:17@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f"
+)
 
 
 def run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -77,7 +80,7 @@ def restore_check(archive: Path) -> None:
                 "docker", "run", "--detach", "--rm", "--name", name,
                 "--network", "none", "-e", "POSTGRES_USER=forgesec",
                 "-e", f"POSTGRES_PASSWORD={password}",
-                "-e", "POSTGRES_DB=forgesec", "postgres:17",
+                "-e", "POSTGRES_DB=forgesec", POSTGRES_RESTORE_IMAGE,
             ],
             capture_output=True,
         )

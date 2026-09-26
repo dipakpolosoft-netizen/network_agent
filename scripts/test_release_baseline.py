@@ -51,7 +51,14 @@ class ReleaseBaselineTests(unittest.TestCase):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("FROM python:3.13-slim\nimage: postgres:17\n", encoding="utf-8")
+            backup = root / "scripts/production_backup.py"
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            backup.write_text('POSTGRES_RESTORE_IMAGE = "postgres:17"\n', encoding="utf-8")
+            self.assertEqual(len(unpinned_container_images(root)), 9)
+            backup.write_text('POSTGRES_RESTORE_IMAGE = "postgres:17@sha256:' + 'a' * 64 + '"\n', encoding="utf-8")
             self.assertEqual(len(unpinned_container_images(root)), 8)
+            backup.write_text('POSTGRES_RESTORE_IMAGE = get_image()\n', encoding="utf-8")
+            self.assertEqual(len(unpinned_container_images(root)), 9)
 
     def test_lock_requires_pins_hashes_and_expected_packages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

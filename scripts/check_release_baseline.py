@@ -139,6 +139,26 @@ def unpinned_container_images(root: Path) -> list[str]:
                 if label not in seen:
                     images.append(label)
                     seen.add(label)
+    backup = root / "scripts/production_backup.py"
+    if not backup.is_file():
+        images.append("scripts/production_backup.py: missing")
+    else:
+        try:
+            tree = ast.parse(backup.read_text(encoding="utf-8"))
+            assigned = next(
+                (
+                    node.value
+                    for node in tree.body
+                    if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "POSTGRES_RESTORE_IMAGE" for target in node.targets)
+                ),
+                None,
+            )
+            restore_image = ast.literal_eval(assigned) if assigned is not None else None
+        except (OSError, SyntaxError, ValueError, TypeError):
+            restore_image = None
+        if not isinstance(restore_image, str) or not re.search(r"@sha256:[0-9a-fA-F]{64}$", restore_image):
+            images.append(f"scripts/production_backup.py: {restore_image or 'unconfigured'}")
     return images
 
 
