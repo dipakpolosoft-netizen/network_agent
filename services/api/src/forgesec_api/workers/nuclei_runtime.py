@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -105,7 +106,11 @@ def parse_findings(output: Path, target: str) -> list[dict[str, str]]:
     if output.stat().st_size > MAX_OUTPUT_BYTES:
         raise WorkerRuntimeError("Nuclei output exceeded the evidence limit")
     findings: list[dict[str, str]] = []
-    for line in output.read_text(encoding="utf-8").splitlines():
+    try:
+        lines = output.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise WorkerRuntimeError("Nuclei output could not be read") from exc
+    for line in lines:
         try:
             item = json.loads(line)
         except json.JSONDecodeError as exc:
@@ -132,6 +137,27 @@ def parse_findings(output: Path, target: str) -> list[dict[str, str]]:
     return findings
 
 
+def verify_clear_response(target: str) -> None:
+    parsed = urlsplit(target)
+    connection_type = HTTPSConnection if parsed.scheme == "https" else HTTPConnection
+    connection = connection_type(parsed.hostname, parsed.port, timeout=5)
+    try:
+        connection.request("GET", "/", headers={"User-Agent": "ForgeSec-web-check/0.1"})
+        response = connection.getresponse()
+        if not 200 <= response.status < 300:
+            raise WorkerRuntimeError("Web check did not receive a 2xx response")
+        if response.getheader("X-Content-Type-Options") is None:
+            raise WorkerRuntimeError(
+                "Nuclei reported no finding, but the response lacks the checked header"
+            )
+    except (HTTPException, OSError, TimeoutError) as exc:
+        raise WorkerRuntimeError(
+            "Web check could not verify the target response"
+        ) from exc
+    finally:
+        connection.close()
+
+
 def _child_env(temp_dir: Path) -> dict[str, str]:
     allowed = {"PATH", "SYSTEMROOT", "WINDIR", "TMP", "TEMP", "LANG"}
     environment = {
@@ -143,11 +169,35 @@ def _child_env(temp_dir: Path) -> dict[str, str]:
     return environment
 
 
+def verify_binary(binary: Path) -> None:
+    if not binary.is_file():
+        raise WorkerRuntimeError("Nuclei binary is missing")
+    try:
+        with tempfile.TemporaryDirectory(prefix="forgesec-nuclei-check-") as directory:
+            version = subprocess.run(
+                [str(binary.resolve()), "-version"],
+                cwd=directory,
+                env=_child_env(Path(directory)),
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=8,
+                check=False,
+            )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise WorkerRuntimeError("Nuclei version check could not run") from exc
+    if (
+        version.returncode != 0
+        or "nuclei" not in (version.stdout + version.stderr).lower()
+    ):
+        raise WorkerRuntimeError("Nuclei version check did not identify Nuclei")
+
+
 def run_nuclei(
     job: dict,
     binary: Path,
     *,
-    on_tick: Callable[[], None],
+    on_tick: Callable[[bool], None],
 ) -> dict[str, Any]:
     target = _target(job)
     with tempfile.TemporaryDirectory(prefix="forgesec-nuclei-") as directory:
@@ -155,14 +205,17 @@ def run_nuclei(
         output = temporary / "findings.jsonl"
         command = build_command(binary, target, output)
         with (temporary / "stderr.log").open("wb") as stderr:
-            process = subprocess.Popen(
-                command,
-                cwd=temporary,
-                env=_child_env(temporary),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=stderr,
-            )
+            try:
+                process = subprocess.Popen(
+                    command,
+                    cwd=temporary,
+                    env=_child_env(temporary),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr,
+                )
+            except OSError as exc:
+                raise WorkerRuntimeError("Nuclei could not start") from exc
             deadline = time.monotonic() + MAX_RUN_SECONDS
             try:
                 while process.poll() is None:
@@ -180,12 +233,16 @@ def run_nuclei(
                 raise
         if process.returncode != 0:
             raise WorkerRuntimeError(f"Nuclei exited with code {process.returncode}")
+        on_tick(True)
+        findings = parse_findings(output, target)
+        if not findings:
+            verify_clear_response(target)
         evidence = {
             "schema_version": "1.0",
             "engine": "nuclei",
             "target_url": target,
             "template_profile": "http_baseline",
-            "findings": parse_findings(output, target),
+            "findings": findings,
         }
         return NucleiEvidence.model_validate(evidence).model_dump(mode="json")
 
@@ -193,6 +250,7 @@ def run_nuclei(
 def run_forever(client: WorkerClient, binary: Path) -> None:
     if not binary.is_file() or not TEMPLATE_PATH.is_file():
         raise WorkerRuntimeError("Nuclei binary or ForgeSec template is missing")
+    verify_binary(binary)
     last_heartbeat = 0.0
     while True:
         try:
@@ -206,13 +264,13 @@ def run_forever(client: WorkerClient, binary: Path) -> None:
                 continue
             last_renewal = time.monotonic()
 
-            def keep_lease(claimed_job: dict = job) -> None:
+            def keep_lease(force: bool = False, claimed_job: dict = job) -> None:
                 nonlocal last_heartbeat, last_renewal
                 current = time.monotonic()
                 if current - last_heartbeat >= 25:
                     client.heartbeat()
                     last_heartbeat = current
-                if current - last_renewal >= 45:
+                if force or current - last_renewal >= 10:
                     try:
                         client.renew(claimed_job)
                     except WorkerRuntimeError as exc:
@@ -220,6 +278,13 @@ def run_forever(client: WorkerClient, binary: Path) -> None:
                     last_renewal = current
 
             try:
+                try:
+                    client.renew(job)
+                except WorkerRuntimeError as exc:
+                    raise WorkerLeaseLost(
+                        "Scanner lease could not be verified"
+                    ) from exc
+                last_renewal = time.monotonic()
                 evidence = run_nuclei(job, binary, on_tick=keep_lease)
                 client.finish(
                     job,

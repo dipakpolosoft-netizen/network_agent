@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from datetime import timedelta
 
+from forgesec_api.assets.service import normalize_mac
 from forgesec_api.storage import JsonStore
 from forgesec_api.time import parse_timestamp, utc_now
 
@@ -16,11 +17,14 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()[:24]
 
 
-def _unique_index(pairs: list[tuple[str, str]]) -> dict[str, str]:
+def _unique_index(pairs: list[tuple[str, str]]) -> tuple[dict[str, str], set[str]]:
     candidates: dict[str, set[str]] = {}
     for key, asset_id in pairs:
         candidates.setdefault(key, set()).add(asset_id)
-    return {key: next(iter(ids)) for key, ids in candidates.items() if len(ids) == 1}
+    return (
+        {key: next(iter(ids)) for key, ids in candidates.items() if len(ids) == 1},
+        {key for key, ids in candidates.items() if len(ids) > 1},
+    )
 
 
 def _asset_node(asset: dict) -> dict:
@@ -35,14 +39,25 @@ def _asset_node(asset: dict) -> dict:
     }
 
 
-def _neighbor_node(site_id: str, neighbor: dict) -> dict:
+def _neighbor_node(site_id: str, reporter_id: str, neighbor: dict) -> dict:
     chassis = neighbor["remote_chassis_id"]
     subtype = neighbor["remote_chassis_subtype"]
     label = neighbor.get("remote_system_name")
     if not label and subtype == 4 and len(chassis) == 12:
         label = ":".join(chassis[index : index + 2] for index in range(0, 12, 2))
     return {
-        "id": f"neighbor:{_digest(f'{site_id}|{subtype}|{chassis}')}",
+        "id": "neighbor:" + _digest(
+            "|".join(
+                (
+                    site_id,
+                    reporter_id,
+                    neighbor["local_port"],
+                    str(subtype),
+                    chassis,
+                    neighbor.get("remote_port") or "",
+                )
+            )
+        ),
         "asset_id": None,
         "label": label or "Unresolved LLDP neighbor",
         "ip": None,
@@ -68,12 +83,23 @@ def build_topology(store: JsonStore, site_id: str, *, include_stale: bool) -> di
         ):
             continue
         previous = snapshots.get(asset_id)
-        if previous is None or parse_timestamp(observation["observed_at"]) > (
-            parse_timestamp(previous["observed_at"])
+        observed_at = parse_timestamp(observation["observed_at"])
+        previous_at = (
+            parse_timestamp(previous["observed_at"]) if previous else None
+        )
+        if (
+            previous_at is None
+            or observed_at > previous_at
+            or (
+                observed_at == previous_at
+                and observation["source_id"]
+                == assets[asset_id].get("last_discovery_id")
+            )
         ):
             snapshots[asset_id] = observation
 
-    chassis_index = _unique_index(
+    cutoff = utc_now() - STALE_AFTER
+    chassis_index, ambiguous_chassis = _unique_index(
         [
             (
                 f"{item['lldp_chassis_subtype']}:{item['lldp_chassis_id']}",
@@ -81,12 +107,17 @@ def build_topology(store: JsonStore, site_id: str, *, include_stale: bool) -> di
             )
             for asset_id, item in snapshots.items()
             if item.get("lldp_chassis_subtype") and item.get("lldp_chassis_id")
+            and parse_timestamp(item["observed_at"]) >= cutoff
         ]
     )
-    mac_index = _unique_index(
-        [(asset["mac"], asset_id) for asset_id, asset in assets.items() if asset["mac"]]
+    mac_index, _ambiguous_macs = _unique_index(
+        [
+            (mac, asset_id)
+            for asset_id, asset in assets.items()
+            if (mac := normalize_mac(asset.get("mac")))
+            and parse_timestamp(asset["last_seen"]) >= cutoff
+        ]
     )
-    cutoff = utc_now() - STALE_AFTER
     nodes: dict[str, dict] = {}
     links: dict[str, dict] = {}
     stale_hidden = 0
@@ -101,17 +132,29 @@ def build_topology(store: JsonStore, site_id: str, *, include_stale: bool) -> di
                 continue
             subtype = neighbor["remote_chassis_subtype"]
             chassis = neighbor["remote_chassis_id"]
-            remote_id = chassis_index.get(f"{subtype}:{chassis}")
-            if remote_id is None and subtype == 4 and len(chassis) == 12:
-                mac = ":".join(chassis[index : index + 2] for index in range(0, 12, 2))
-                remote_id = mac_index.get(mac)
+            chassis_key = f"{subtype}:{chassis}"
+            remote_id = chassis_index.get(chassis_key)
+            match_method = "chassis_id" if remote_id else "unresolved"
+            if (
+                remote_id is None
+                and chassis_key not in ambiguous_chassis
+                and subtype == 4
+                and len(chassis) == 12
+            ):
+                mac = normalize_mac(
+                    ":".join(chassis[index : index + 2] for index in range(0, 12, 2))
+                )
+                remote_id = mac_index.get(mac) if mac else None
+                if remote_id:
+                    match_method = "mac"
             if remote_id == asset_id:
-                continue
+                remote_id = None
+                match_method = "unresolved"
             source = _asset_node(assets[asset_id])
             target = (
                 _asset_node(assets[remote_id])
                 if remote_id
-                else _neighbor_node(site_id, neighbor)
+                else _neighbor_node(site_id, asset_id, neighbor)
             )
             nodes[source["id"]] = source
             nodes[target["id"]] = target
@@ -131,9 +174,11 @@ def build_topology(store: JsonStore, site_id: str, *, include_stale: bool) -> di
                 "source": source["id"],
                 "target": target["id"],
                 "reported_by": asset_id,
+                "probe_id": observation["agent_id"],
                 "local_port": neighbor["local_port"],
                 "remote_port": neighbor.get("remote_port"),
                 "remote_system_name": neighbor.get("remote_system_name"),
+                "match_method": match_method,
                 "discovery_id": observation["source_id"],
                 "observed_at": observed_at,
                 "stale": stale,
@@ -154,6 +199,22 @@ def build_topology(store: JsonStore, site_id: str, *, include_stale: bool) -> di
             key=lambda node: (node["observed_only"], node["label"].casefold()),
         ),
         "links": visible_links,
+        "probes": [
+            {
+                "agent_id": agent["agent_id"],
+                "label": agent["label"],
+                "hostname": agent["hostname"],
+                "ip": agent.get("local_ip"),
+                "subnet": agent.get("subnet"),
+                "os_name": agent["os_name"],
+                "agent_version": agent["agent_version"],
+                "last_heartbeat_at": agent.get("last_heartbeat_at"),
+            }
+            for agent in store.list_by_field("agents", "site_id", site_id)
+            if agent.get("site_id") == site_id
+            and agent.get("last_heartbeat_at")
+            and not agent.get("revoked_at")
+        ],
         "observed_assets": len(snapshots),
         "unlinked_assets": len(assets)
         - len({node["asset_id"] for node in nodes.values() if node["asset_id"]}),

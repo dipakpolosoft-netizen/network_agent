@@ -16,14 +16,18 @@ Transfer `scripts/check-agent-lifecycle.ps1` to a local folder on the VM. In ele
 ```powershell
 $base = 'https://scan.your-real-domain.com'
 $installer = Join-Path $PWD 'ForgeSec-Network-Agent-Setup.exe'
+$reviewedCommit = '<reviewed-40-character-git-sha>'
+$acceptedSha256 = '<SHA-256 obtained directly from the build owner>'
+$approvedSigner = '<approved certificate thumbprint from the release record>'
 Invoke-WebRequest "$base/downloads/agent/ForgeSec-Network-Agent-Setup.exe" -OutFile $installer
 Invoke-WebRequest "$base/downloads/agent/release.json" -OutFile (Join-Path $PWD 'release.json')
 .\check-agent-lifecycle.ps1 -Stage Preflight -RequireProduction `
   -InstallerPath $installer -ReleaseMetadataPath .\release.json `
-  -ApiUrl $base -ExpectedVersion '<release-version>'
+  -ApiUrl $base -ExpectedVersion '<release-version>' -ExpectedCommit $reviewedCommit `
+  -ExpectedSha256 $acceptedSha256 -ExpectedSignerThumbprint $approvedSigner
 ```
 
-Stop on any failed check. Compare the hash to the build host's `dist\installer\release-manifest.json` through a separate trusted channel. Check the certificate publisher and validity in Windows Properties as well as the preflight's Authenticode result. Record VM snapshot, Windows build, installer hash/version, certificate publisher, and the approved site/CIDR. Do not erase residual files to make an unclean VM pass; restore the snapshot or use a new VM.
+Stop on any failed check. Obtain `$acceptedSha256` and `$approvedSigner` from the build owner through a separate trusted channel, never from the same public download endpoint. Confirm the manifest's source commit against the reviewed release revision. Check the certificate publisher and validity in Windows Properties as well as the preflight's Authenticode result. Record VM snapshot, Windows build, installer hash/version, certificate publisher, and the approved site/CIDR. Do not erase residual files to make an unclean VM pass; restore the snapshot or use a new VM.
 
 ## 2. Install and observe
 
@@ -35,7 +39,8 @@ $setup = Start-Process -FilePath $installer -Wait -PassThru
 $setup.ExitCode
 Start-Sleep -Seconds 45
 .\check-agent-lifecycle.ps1 -Stage Installed -RequireProduction -RequireTray `
-  -ExpectedVersion '<release-version>' -NotBeforeUtc $started
+  -ExpectedVersion '<release-version>' -ExpectedSignerThumbprint $approvedSigner `
+  -NotBeforeUtc $started
 ```
 
 Require exit code 0. Observe the ForgeSec logo and readable text on welcome, enrollment, progress, and finish screens. Check the visible tray icon in the signed-in desktop, not only its process. The installed check requires signed agent/tray binaries, Nmap, Npcap, protected identity, service, scanner-ready diagnostics, and a fresh online heartbeat. If heartbeat is delayed, wait up to 90 seconds and rerun; do not issue a second enrollment token unless the first enrollment has genuinely failed.
@@ -56,7 +61,8 @@ $restarted = (Get-Date).ToUniversalTime()
 Restart-Service ForgeSecNetworkAgent
 Start-Sleep -Seconds 45
 .\check-agent-lifecycle.ps1 -Stage Installed -RequireProduction -RequireTray `
-  -ExpectedAgentId $agentId -ExpectedVersion '<release-version>' -NotBeforeUtc $restarted
+  -ExpectedAgentId $agentId -ExpectedVersion '<release-version>' `
+  -ExpectedSignerThumbprint $approvedSigner -NotBeforeUtc $restarted
 ```
 
 An upgrade test requires a **newer signed production release**, not a reinstall of the same version or a development build. Install it over the first release without `/RESETAGENTDATA=1`; verify the same agent ID and site, new version, new heartbeat, and working tray. If a newer release is unavailable, mark upgrade **not tested**; do not report the whole lifecycle gate as passed.

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from approval_payload import approved_scope
 from fastapi.testclient import TestClient
 from test_enrollment_flow import enroll_agent, enrollment
 
 
-def online_agent(client: TestClient) -> dict:
+def online_agent(client: TestClient, scan_profiles: list[str] | None = None) -> dict:
     created = enrollment(client)
     agent = enroll_agent(client, created["enrollment_token"])
     response = client.post(
@@ -30,9 +31,12 @@ def online_agent(client: TestClient) -> dict:
     )
     assert response.status_code == 200
     site_id = client.get("/api/agents").json()[0]["site_id"]
+    scope = approved_scope("192.168.1.0/24", "Test LAN")
+    if scan_profiles is not None:
+        scope["scan_profiles"] = scan_profiles
     assert client.post(
         f"/api/sites/{site_id}/scopes",
-        json={"cidr": "192.168.1.0/24", "label": "Test LAN"},
+        json=scope,
     ).status_code == 201
     return agent
 
@@ -143,3 +147,73 @@ def test_network_services_nmap_diagnostic_is_accepted(client: TestClient) -> Non
     assert command["payload"]["target_ip"] == "192.168.1.2"
     assert command["payload"]["diagnostic_type"] == "network_services_nmap"
     assert command["payload"]["scope_policy"][0]["cidr"] == "192.168.1.0/24"
+
+
+def test_nmap_host_check_requires_its_approved_profile(client: TestClient) -> None:
+    agent = online_agent(client, scan_profiles=["inventory"])
+    endpoint = f"/api/agents/{agent['agent_id']}/diagnostics"
+    for diagnostic_type in ("network_services_nmap", "standard_nmap"):
+        response = client.post(
+            endpoint,
+            json={"target_ip": "192.168.1.2", "diagnostic_type": diagnostic_type},
+        )
+        assert response.status_code == 422
+    assert client.post(
+        endpoint,
+        json={"target_ip": "192.168.1.2", "diagnostic_type": "inventory_nmap"},
+    ).status_code == 202
+    assert client.post(
+        endpoint,
+        json={"target_ip": "192.168.1.2", "diagnostic_type": "ping"},
+    ).status_code == 202
+
+
+def test_full_tcp_host_check_needs_profile_and_confirmation(client: TestClient) -> None:
+    agent = online_agent(client, scan_profiles=["inventory"])
+    endpoint = f"/api/agents/{agent['agent_id']}/diagnostics"
+    request = {
+        "target_ip": "192.168.1.2",
+        "diagnostic_type": "full_tcp_nmap",
+        "full_tcp_confirmed": True,
+    }
+    assert client.post(endpoint, json=request).status_code == 422
+    site_id = client.get("/api/agents").json()[0]["site_id"]
+    scope_id = client.get(f"/api/sites/{site_id}/scopes").json()[0]["scope_id"]
+    scope = client.app.state.store.read("approved-scopes", scope_id)
+    scope["scan_profiles"] = ["inventory", "full_tcp"]
+    client.app.state.store.write("approved-scopes", scope_id, scope)
+    assert (
+        client.post(endpoint, json={**request, "full_tcp_confirmed": False}).status_code
+        == 422
+    )
+    created = client.post(endpoint, json=request)
+    assert created.status_code == 202
+    command = client.get(
+        "/agent/commands/next",
+        headers={"Authorization": f"Bearer {agent['agent_credential']}"},
+    ).json()
+    assert command["payload"]["full_tcp_confirmed"] is True
+
+
+def test_queued_nmap_host_check_is_cancelled_when_profile_removed(
+    client: TestClient,
+) -> None:
+    agent = online_agent(client)
+    endpoint = f"/api/agents/{agent['agent_id']}/diagnostics"
+    created = client.post(
+        endpoint,
+        json={"target_ip": "192.168.1.2", "diagnostic_type": "standard_nmap"},
+    )
+    assert created.status_code == 202
+    site_id = client.get("/api/agents").json()[0]["site_id"]
+    scope_id = client.get(f"/api/sites/{site_id}/scopes").json()[0]["scope_id"]
+    scope = client.app.state.store.read("approved-scopes", scope_id)
+    scope["scan_profiles"] = ["inventory"]
+    client.app.state.store.write("approved-scopes", scope_id, scope)
+    claimed = client.get(
+        "/agent/commands/next",
+        headers={"Authorization": f"Bearer {agent['agent_credential']}"},
+    )
+    assert claimed.status_code == 204
+    saved = client.get(f"{endpoint}/{created.json()['command_id']}").json()
+    assert saved["status"] == "cancelled"

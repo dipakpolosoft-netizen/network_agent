@@ -1,8 +1,9 @@
 # Step 14: Pilot baseline and authorization
 
-Complete this before installing or scanning on a real network. This step is
-planning and read-only validation only; it does not create a site, issue an
-enrollment token, or start discovery. Keep the filled plan locally because site
+Complete the authorization before scanning on a real network. Enrollment and
+heartbeats may happen before approval, but they never authorize a scan. This
+document and validator do not create a site, issue a token, or start discovery.
+Keep the filled plan locally because site
 names, device addresses, and approval references may be sensitive.
 
 ## 1. Confirm the pilot boundary
@@ -14,6 +15,10 @@ approved CIDR, excluded addresses, permitted profiles, approver, reference,
 and expiry. Choose only one connected discovery segment with at most 256
 addresses for the first test. Discovery does not cross a router automatically;
 the selected segment must appear in the enrolled probe's reported options.
+Individual excluded hosts or smaller CIDRs may be inside that segment; they must
+be omitted from probe traffic and uploaded evidence. A segment whose usable
+addresses are all excluded is not a valid discovery pilot. Verify exclusion
+behavior with an approved packet capture, not only with an API rejection.
 
 The `172.168.x.x` examples from earlier screenshots are **not** RFC1918 private
 space; do not assume they are authorized. A public/nonprivate range needs
@@ -21,11 +26,15 @@ explicit approval and the application's public-range confirmation. Never infer
 approval from an `ipconfig` output. Do not use `Scan all` or `full_tcp` for the
 first baseline test.
 
-Record two or three known devices on that segment: expected IP, device type,
-and any known TCP ports. An empty port list means the port expectation is
-unknown, not that all ports are closed. Avoid relying on vendor, hostname, or
-OS detection as a guaranteed result. Keep a separate note of any firewall or
+For the later accuracy pilot, record two or three known devices on that segment: expected IP, device type,
+and known TCP ports. At least one device must have a known open TCP port and
+must be the target of the first scan. An empty port list for another device
+means the port expectation is unknown, not that all ports are closed. Avoid
+relying on vendor, hostname, or OS detection as a guaranteed result. Keep a separate note of any firewall or
 host-discovery restrictions that could explain a missed device.
+These two or three entries are comparison samples, not a discovery or scan limit.
+For the authorization-only gate, use `"known_devices": []` until those facts
+are available; do not fill it with made-up targets.
 
 ## 2. Fill and validate the local plan
 
@@ -35,6 +44,14 @@ From the repository root in PowerShell:
 Copy-Item .\docs\pilot-plan.example.json .\docs\pilot-plan.local.json
 notepad .\docs\pilot-plan.local.json
 python .\scripts\check_pilot_plan.py .\docs\pilot-plan.local.json
+```
+
+The default authorization check does not require `known_devices`; leave it
+empty or omit it until the accuracy pilot. Before comparing discovery or scans
+with reality, add the known devices and run:
+
+```powershell
+python .\scripts\check_pilot_plan.py .\docs\pilot-plan.local.json --mode accuracy
 ```
 
 `pilot-plan.local.json` is ignored by Git. The validator uses only the local
@@ -69,8 +86,9 @@ before Step 15, and keep it out of the plan file and shell history.
 
 ## Exit gate
 
-Step 14 is complete only when the filled plan passes validation, the written
-authorization is on record, the chosen Windows machine and segment match,
-two or three expected devices are recorded, and the probe-facing API URL is
-reachable from that machine. Then create the site and exact approval in the UI,
-and proceed to Step 15. None of these checks authorizes a broader scan.
+The authorization gate passes only with a genuine written approval, the exact
+CIDR and exclusions, a future expiry, and explicit public-range approval where
+needed. The accuracy gate additionally needs two or three expected devices.
+Create the site and exact approval in the UI before any network operation.
+The probe-facing API URL must be reachable from the chosen Windows machine.
+None of these checks authorizes a broader scan.

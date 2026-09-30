@@ -51,6 +51,7 @@ class JsonStore:
         "scanner-worker-jobs",
         "assets",
         "asset-observations",
+        "asset-evidence-reviews",
         "asset-mac-index",
         "asset-ip-index",
         "asset-migrations",

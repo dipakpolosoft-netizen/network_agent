@@ -15,11 +15,16 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
+from pydantic import ValidationError
+
 from forgesec_api.storage import JsonStore
 from forgesec_api.time import isoformat, utc_now
+from forgesec_api.vulnerabilities.models import VulnerabilityLookup
 
 NVD_CVE_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 CVE_ID = re.compile(r"^CVE-\d{4}-\d{4,}$", re.IGNORECASE)
+MAX_PROVIDER_RESULTS = 2000
+MAX_SAVED_MATCHES = 500
 
 
 class VulnerabilityError(RuntimeError):
@@ -43,6 +48,8 @@ def normalize_cpe(cpe: str) -> str:
             raise InvalidCpe("CPE 2.3 must contain 11 components")
         normalized = value
     elif value.startswith("cpe:/"):
+        if "\\" in value or "~" in value:
+            raise InvalidCpe("Escaped or packed CPE 2.2 components are unsupported")
         packed = value[5:].split(":")
         if not packed or len(packed) > 7:
             raise InvalidCpe("CPE 2.2 has an unsupported component count")
@@ -83,8 +90,7 @@ class VulnerabilityService:
         with self._lock:
             cached = self._read_cache(normalized)
             if cached is not None:
-                cached["cached"] = True
-                return cached
+                return {**cached, "cpe": cpe, "cached": True}
             result = self._request(cpe, normalized)
             self._write_cache(normalized, result)
             return result
@@ -93,7 +99,7 @@ class VulnerabilityService:
         query = urlencode(
             {
                 "cpeName": normalized_cpe,
-                "resultsPerPage": 2000,
+                "resultsPerPage": MAX_PROVIDER_RESULTS,
             }
         )
         request = Request(
@@ -112,16 +118,43 @@ class VulnerabilityService:
             if exc.code != 403 and exc.code != 429:
                 detail = f"NVD returned HTTP {exc.code}"
             raise VulnerabilityProviderUnavailable(detail) from exc
-        except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        except (
+            URLError, TimeoutError, OSError, UnicodeError, json.JSONDecodeError
+        ) as exc:
             raise VulnerabilityProviderUnavailable(
                 "NVD could not be reached or returned an invalid response"
             ) from exc
 
-        matches = [
-            parsed
-            for item in payload.get("vulnerabilities", [])
-            if (parsed := _parse_vulnerability(item)) is not None
-        ]
+        if not isinstance(payload, dict):
+            raise VulnerabilityProviderUnavailable("NVD returned an invalid response")
+        total = payload.get("totalResults")
+        raw_matches = payload.get("vulnerabilities")
+        if (
+            isinstance(total, bool)
+            or not isinstance(total, int)
+            or total < 0
+            or not isinstance(raw_matches, list)
+            or len(raw_matches) > MAX_PROVIDER_RESULTS
+            or len(raw_matches) > total
+            or (total > 0 and not raw_matches)
+            or payload.get("startIndex", 0) != 0
+        ):
+            raise VulnerabilityProviderUnavailable("NVD returned an invalid response")
+        matches = []
+        for item in raw_matches:
+            if not isinstance(item, dict) or not isinstance(item.get("cve"), dict):
+                raise VulnerabilityProviderUnavailable("NVD returned an invalid CVE")
+            try:
+                parsed = _parse_vulnerability(item)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise VulnerabilityProviderUnavailable(
+                    "NVD returned an invalid CVE"
+                ) from exc
+            if parsed is None:
+                raise VulnerabilityProviderUnavailable("NVD returned an invalid CVE")
+            matches.append(parsed)
+        if len({item["cve_id"] for item in matches}) != len(matches):
+            raise VulnerabilityProviderUnavailable("NVD returned duplicate CVE records")
         matches.sort(
             key=lambda item: (
                 not item["known_exploited"],
@@ -129,13 +162,15 @@ class VulnerabilityService:
                 item["cve_id"],
             )
         )
-        matches = matches[:500]
-        return {
+        truncated = total > len(raw_matches) or len(matches) > MAX_SAVED_MATCHES
+        matches = matches[:MAX_SAVED_MATCHES]
+        result = {
             "source": "NVD",
             "cpe": original_cpe,
             "normalized_cpe": normalized_cpe,
-            "total": int(payload.get("totalResults", len(matches))),
+            "total": total,
             "returned": len(matches),
+            "truncated": truncated,
             "retrieved_at": isoformat(utc_now()),
             "cached": False,
             "vulnerabilities": matches,
@@ -145,6 +180,13 @@ class VulnerabilityService:
                 "before remediation."
             ),
         }
+        try:
+            VulnerabilityLookup.model_validate(result)
+        except ValidationError as exc:
+            raise VulnerabilityProviderUnavailable(
+                "NVD returned an invalid CVE"
+            ) from exc
+        return result
 
     def _cache_path(self, normalized_cpe: str) -> Path:
         digest = hashlib.sha256(normalized_cpe.encode("utf-8")).hexdigest()
@@ -155,24 +197,55 @@ class VulnerabilityService:
             document = self.store.read(
                 "vulnerability-cache", self._cache_key(normalized_cpe)
             )
-            return self._fresh_payload(document)
+            return self._fresh_payload(document, normalized_cpe)
         path = self._cache_path(normalized_cpe)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeError, json.JSONDecodeError):
             return None
-        return self._fresh_payload(payload)
+        return self._fresh_payload(payload, normalized_cpe)
 
-    def _fresh_payload(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    def _fresh_payload(
+        self, payload: dict[str, Any] | None, normalized_cpe: str
+    ) -> dict[str, Any] | None:
+        if (
+            not isinstance(payload, dict)
+            or payload.get("normalized_cpe") != normalized_cpe
+            or not isinstance(payload.get("total"), int)
+            or not isinstance(payload.get("returned"), int)
+            or isinstance(payload["total"], bool)
+            or isinstance(payload["returned"], bool)
+            or payload["total"] < payload["returned"]
+            or not isinstance(payload.get("vulnerabilities"), list)
+            or payload["returned"] != len(payload["vulnerabilities"])
+        ):
+            return None
         try:
             retrieved_at = datetime.fromisoformat(payload["retrieved_at"])
         except (KeyError, TypeError, ValueError, AttributeError):
             return None
         if retrieved_at.tzinfo is None:
             retrieved_at = retrieved_at.replace(tzinfo=UTC)
+        if retrieved_at > utc_now() + timedelta(minutes=1):
+            return None
         if utc_now() - retrieved_at > self.cache_ttl:
             return None
-        return payload
+        fresh = {
+            **payload,
+            "truncated": bool(payload.get("truncated"))
+            or payload["total"] > payload["returned"],
+        }
+        try:
+            VulnerabilityLookup.model_validate(fresh)
+        except ValidationError:
+            return None
+        vulnerabilities = fresh["vulnerabilities"]
+        ids = [item["cve_id"] for item in vulnerabilities]
+        if any(not CVE_ID.fullmatch(cve_id) for cve_id in ids):
+            return None
+        if len(set(ids)) != len(ids):
+            return None
+        return fresh
 
     def _write_cache(self, normalized_cpe: str, payload: dict[str, Any]) -> None:
         if self.store is not None:

@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
+import re
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from forgesec_agent.enrollment import AgentIdentity, timestamp
+from forgesec_agent.heartbeat import HeartbeatSender
 from forgesec_agent.scanning.nmap_runner import (
     NETWORK_SERVICE_PORTS,
     find_nmap_executable,
@@ -17,6 +21,13 @@ from forgesec_agent.scanning.policy import require_approved
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 MAX_OUTPUT_CHARS = 16000
+LOGGER = logging.getLogger(__name__)
+DIAGNOSTIC_SCAN_PROFILES = {
+    "inventory_nmap": "inventory",
+    "network_services_nmap": "network_services",
+    "standard_nmap": "standard",
+    "full_tcp_nmap": "full_tcp",
+}
 
 
 class DiagnosticClient(Protocol):
@@ -38,6 +49,9 @@ class DiagnosticSpec:
 
 
 class DeviceDiagnosticHandler:
+    def __init__(self, heartbeat: HeartbeatSender | None = None):
+        self.heartbeat = heartbeat
+
     def handle(
         self,
         command: dict[str, Any],
@@ -49,7 +63,16 @@ class DeviceDiagnosticHandler:
         diagnostic_type = str(payload.get("diagnostic_type", ""))
         try:
             target_ip = str(ipaddress.IPv4Address(str(payload.get("target_ip", ""))))
-            require_approved(payload.get("scope_policy"), [target_ip])
+            if (
+                diagnostic_type == "full_tcp_nmap"
+                and payload.get("full_tcp_confirmed") is not True
+            ):
+                raise ValueError("Full TCP host check requires separate confirmation")
+            require_approved(
+                payload.get("scope_policy"),
+                [target_ip],
+                DIAGNOSTIC_SCAN_PROFILES.get(diagnostic_type),
+            )
             spec = _diagnostic_spec(diagnostic_type, target_ip)
         except Exception as exc:
             self._event(
@@ -80,6 +103,17 @@ class DeviceDiagnosticHandler:
             },
         )
         started_at = time.monotonic()
+        keepalive_stop = threading.Event()
+        keepalive_thread: threading.Thread | None = None
+        if self.heartbeat is not None:
+            self._keepalive(identity, command_id, spec.label, client)
+            keepalive_thread = threading.Thread(
+                target=self._keepalive_until_stopped,
+                args=(keepalive_stop, identity, command_id, spec.label, client),
+                name="forgesec-diagnostic-heartbeat",
+                daemon=True,
+            )
+            keepalive_thread.start()
         try:
             result = subprocess.run(
                 list(spec.argv),
@@ -91,6 +125,11 @@ class DeviceDiagnosticHandler:
             )
             completed = timestamp()
             output = _trim_output(result.stdout, result.stderr)
+            ping_result = (
+                _ping_result(target_ip, _decode(result.stdout))
+                if diagnostic_type == "ping"
+                else None
+            )
             details = {
                 "diagnostic_type": diagnostic_type,
                 "target_ip": target_ip,
@@ -100,16 +139,18 @@ class DeviceDiagnosticHandler:
                 "duration_ms": int((time.monotonic() - started_at) * 1000),
                 "started_at": started,
                 "completed_at": completed,
-                "reachable": (
-                    result.returncode == 0 if diagnostic_type == "ping" else None
-                ),
             }
+            if ping_result is not None:
+                details["reachable"] = ping_result == "reply"
+                details["ping_result"] = ping_result
             self._event(
                 client,
                 identity,
                 command_id,
                 status="completed",
-                message=_summary(spec.label, diagnostic_type, result.returncode),
+                message=_summary(
+                    spec.label, diagnostic_type, result.returncode, ping_result
+                ),
                 details=details,
             )
         except subprocess.TimeoutExpired as exc:
@@ -145,6 +186,42 @@ class DeviceDiagnosticHandler:
                     "completed_at": timestamp(),
                 },
             )
+        finally:
+            keepalive_stop.set()
+            if keepalive_thread is not None:
+                keepalive_thread.join(timeout=30)
+
+    def _keepalive_until_stopped(
+        self,
+        stop: threading.Event,
+        identity: AgentIdentity,
+        command_id: str,
+        label: str,
+        client: DiagnosticClient,
+    ) -> None:
+        interval = min(20.0, max(0.1, identity.heartbeat_interval_seconds / 2))
+        while not stop.wait(interval):
+            self._keepalive(identity, command_id, label, client)
+
+    def _keepalive(
+        self,
+        identity: AgentIdentity,
+        command_id: str,
+        label: str,
+        client: DiagnosticClient,
+    ) -> None:
+        if self.heartbeat is None:
+            return
+        try:
+            self.heartbeat.send(
+                identity,
+                service_status="busy",
+                current_command_id=command_id,
+                activity=f"Running {label}",
+                client=client,
+            )
+        except Exception as exc:
+            LOGGER.warning("Unable to report diagnostic heartbeat: %s", exc)
 
     @staticmethod
     def _event(
@@ -300,13 +377,34 @@ def _decode(value: str | bytes | None) -> str:
     return value
 
 
-def _summary(label: str, diagnostic_type: str, exit_code: int) -> str:
+def _ping_result(target_ip: str, output: str) -> str:
+    target_reply = re.compile(
+        rf"^\s*Reply from {re.escape(target_ip)}:\s*bytes\s*=\s*\d+",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if target_reply.search(output):
+        return "reply"
+    normalized = output.lower()
+    if any(
+        term in normalized
+        for term in ("unreachable", "general failure", "transmit failed")
+    ):
+        return "unreachable"
+    if "timed out" in normalized:
+        return "timeout"
+    return "no_reply"
+
+
+def _summary(
+    label: str, diagnostic_type: str, exit_code: int, ping_result: str | None = None
+) -> str:
     if diagnostic_type == "ping":
-        return (
-            "Ping completed: host responded"
-            if exit_code == 0
-            else "Ping completed: no response"
-        )
+        outcome = {
+            "reply": "host responded",
+            "unreachable": "destination unreachable",
+            "timeout": "timed out",
+        }.get(ping_result, "no echo reply")
+        return f"Ping completed: {outcome}"
     return (
         f"{label} completed"
         if exit_code == 0

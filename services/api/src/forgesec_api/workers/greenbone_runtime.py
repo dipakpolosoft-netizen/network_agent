@@ -131,12 +131,57 @@ def _findings(response, target_ip: str, report_id: str) -> tuple[list[dict], boo
     report = response.find("report")
     if report is None or report.get("id") != report_id:
         raise WorkerRuntimeError("Greenbone returned the wrong report")
+    details = report.find("report")
+    if details is None or details.get("id") != report_id:
+        raise WorkerRuntimeError("Greenbone report details are missing or mismatched")
+    run_status = details.findtext("scan_run_status")
+    if run_status and run_status != "Done":
+        raise WorkerRuntimeError("Greenbone report is not complete")
+    error_count = details.findtext("errors/count")
+    parsed_errors: int | None = None
+    if error_count is not None:
+        try:
+            parsed_errors = int(error_count)
+        except ValueError as exc:
+            raise WorkerRuntimeError("Greenbone report error count is invalid") from exc
+        if parsed_errors < 0:
+            raise WorkerRuntimeError("Greenbone report error count is invalid")
+        if parsed_errors > 0:
+            raise WorkerRuntimeError("Greenbone report contains scan errors")
+    host_count = details.findtext("hosts/count")
+    if host_count is not None and host_count != "1":
+        raise WorkerRuntimeError("Greenbone did not verify the target host")
+    results = details.findall("results/result")
+    if len(results) > MAX_FINDINGS + 1:
+        raise WorkerRuntimeError("Greenbone exceeded the bounded report page")
+    filtered_count = details.findtext("result_count/filtered")
+    if filtered_count is not None:
+        try:
+            reported_total = int(filtered_count)
+        except ValueError as exc:
+            raise WorkerRuntimeError("Greenbone result count is invalid") from exc
+        if reported_total < len(results):
+            raise WorkerRuntimeError("Greenbone result count is inconsistent")
+    else:
+        reported_total = len(results)
+    if not results:
+        if filtered_count is None or parsed_errors is None:
+            raise WorkerRuntimeError("Greenbone report coverage is unavailable")
+        if reported_total > 0:
+            raise WorkerRuntimeError("Greenbone omitted expected report results")
+        if run_status != "Done" or host_count != "1":
+            raise WorkerRuntimeError("Greenbone did not verify the target host")
+    elif filtered_count is not None and len(results) < min(
+        reported_total, MAX_FINDINGS
+    ):
+        raise WorkerRuntimeError("Greenbone report result page is incomplete")
     findings: list[dict] = []
-    results = report.findall(".//results/result")
-    for item in results[:MAX_FINDINGS]:
+    for index, item in enumerate(results):
         host = item.findtext("host")
         if host != target_ip:
             raise WorkerRuntimeError("Greenbone reported an out-of-scope host")
+        if index >= MAX_FINDINGS:
+            continue
         try:
             result_id = str(UUID(item.get("id")))
             severity = float(item.findtext("severity") or "0")
@@ -161,7 +206,7 @@ def _findings(response, target_ip: str, report_id: str) -> tuple[list[dict], boo
                 "cves": cves,
             }
         )
-    return findings, len(results) > MAX_FINDINGS
+    return findings, reported_total > MAX_FINDINGS
 
 
 def run_greenbone(
@@ -249,9 +294,9 @@ def run_greenbone(
             phase, progress, report_id = _task_status(current)
             if phase == "New":
                 on_tick(None, "Starting")
+                started = True
                 response = gmp.start_task(task_id)
                 report_id = response.findtext("report_id") or report_id
-                started = True
             elif phase in {"Requested", "Queued", "Running", "Done"}:
                 started = phase != "Done"
             else:
@@ -319,24 +364,27 @@ def run_forever(client: WorkerClient, settings: GreenboneSettings) -> None:
             if job is None:
                 time.sleep(POLL_SECONDS)
                 continue
-            last_renewal = time.monotonic()
 
             def keep_lease(
                 progress: int | None, phase: str, claimed_job: dict = job
             ) -> None:
-                nonlocal last_heartbeat, last_renewal
+                nonlocal last_heartbeat
                 current = time.monotonic()
                 if current - last_heartbeat >= 25:
                     client.heartbeat()
                     last_heartbeat = current
-                if current - last_renewal >= 30:
-                    try:
-                        client.renew(claimed_job, progress=progress, phase=phase)
-                    except WorkerRuntimeError as exc:
-                        raise WorkerLeaseLost("Greenbone job lease was lost") from exc
-                    last_renewal = current
+                try:
+                    client.renew(claimed_job, progress=progress, phase=phase)
+                except WorkerRuntimeError as exc:
+                    raise WorkerLeaseLost("Greenbone job lease was lost") from exc
 
             try:
+                try:
+                    client.renew(job, phase="Preparing")
+                except WorkerRuntimeError as exc:
+                    raise WorkerLeaseLost(
+                        "Greenbone job lease could not be verified"
+                    ) from exc
                 evidence = run_greenbone(job, settings, on_tick=keep_lease)
                 client.finish(
                     job,

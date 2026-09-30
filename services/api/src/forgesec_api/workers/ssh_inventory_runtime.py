@@ -27,13 +27,13 @@ PACKAGE_LIMIT = 200
 
 PACKAGE_COMMAND = (
     "if command -v dpkg-query >/dev/null 2>&1; then "
-    "printf 'dpkg\\n'; "
-    "LC_ALL=C dpkg-query -W -f='${binary:Package}\\t${Version}\\n' "
-    "2>/dev/null | head -n 201; "
+    "data=$(LC_ALL=C dpkg-query -W -f='${binary:Package}\\t${Version}\\n' "
+    "2>/dev/null) || exit 1; "
+    "printf 'dpkg\\n'; printf '%s\\n' \"$data\" | head -n 201; "
     "elif command -v rpm >/dev/null 2>&1; then "
-    "printf 'rpm\\n'; "
-    "LC_ALL=C rpm -qa --qf '%{NAME}\\t%{VERSION}-%{RELEASE}\\n' "
-    "2>/dev/null | head -n 201; "
+    "data=$(LC_ALL=C rpm -qa --qf '%{NAME}.%{ARCH}\\t%{VERSION}-%{RELEASE}\\n' "
+    "2>/dev/null) || exit 1; "
+    "printf 'rpm\\n'; printf '%s\\n' \"$data\" | head -n 201; "
     "else printf 'none\\n'; fi"
 )
 
@@ -59,8 +59,15 @@ class SshInventorySettings:
             raise WorkerRuntimeError("SSH key or known_hosts file is unavailable")
         if key_path.stat().st_mode & 0o077:
             raise WorkerRuntimeError("SSH private key must not be group/world readable")
+        if known_hosts_path.stat().st_mode & 0o022:
+            raise WorkerRuntimeError("SSH known_hosts must not be group/world writable")
         username = os.environ[names[0]]
-        if not username or len(username) > 128:
+        if (
+            not username
+            or username != username.strip()
+            or username.casefold() == "root"
+            or len(username) > 128
+        ):
             raise WorkerRuntimeError("Invalid SSH inventory username")
         return cls(username, key_path, known_hosts_path)
 
@@ -72,6 +79,7 @@ def _target(job: dict) -> str:
         or job.get("inventory_profile") != "linux_ssh_readonly"
         or job.get("profile") != "full_tcp"
         or job.get("target_port") is not None
+        or job.get("target_scheme") is not None
         or job.get("assessment_profile") is not None
         or job.get("template_profile") is not None
     ):
@@ -113,19 +121,49 @@ def open_ssh(settings: SshInventorySettings, target_ip: str):
 
 
 def _command(client, command: str) -> str:
-    _stdin, stdout, stderr = client.exec_command(
+    deadline = time.monotonic() + COMMAND_TIMEOUT
+    _stdin, stdout, _stderr = client.exec_command(
         command, timeout=COMMAND_TIMEOUT, get_pty=False
     )
+    channel = stdout.channel
+    output = bytearray()
+    error_bytes = 0
     try:
-        output = stdout.read(MAX_COMMAND_BYTES + 1)
-        if len(output) > MAX_COMMAND_BYTES:
-            raise WorkerRuntimeError("SSH inventory output exceeded the limit")
-        error = stderr.read(4097)
-        if len(error) > 4096 or stdout.channel.recv_exit_status() != 0:
-            raise WorkerRuntimeError("Read-only SSH inventory command failed")
-        return output.decode("utf-8", errors="replace")
+        while True:
+            if time.monotonic() >= deadline:
+                raise WorkerRuntimeError("Read-only SSH inventory command timed out")
+            received = False
+            while channel.recv_ready():
+                chunk = channel.recv(min(4096, MAX_COMMAND_BYTES + 1 - len(output)))
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if len(output) > MAX_COMMAND_BYTES:
+                    raise WorkerRuntimeError("SSH inventory output exceeded the limit")
+                received = True
+            while channel.recv_stderr_ready():
+                chunk = channel.recv_stderr(min(4096, 4097 - error_bytes))
+                if not chunk:
+                    break
+                error_bytes += len(chunk)
+                if error_bytes > 4096:
+                    raise WorkerRuntimeError(
+                        "SSH inventory error output exceeded limit"
+                    )
+                received = True
+            if channel.exit_status_ready():
+                if channel.recv_exit_status() != 0:
+                    raise WorkerRuntimeError("Read-only SSH inventory command failed")
+                try:
+                    return output.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise WorkerRuntimeError(
+                        "SSH inventory output is not valid UTF-8"
+                    ) from exc
+            if not received:
+                time.sleep(0.05)
     finally:
-        stdout.channel.close()
+        channel.close()
 
 
 def _os_release(value: str) -> tuple[str, str | None]:
@@ -141,10 +179,11 @@ def _os_release(value: str) -> tuple[str, str | None]:
         except ValueError:
             continue
         if len(parsed) == 1:
-            fields[name] = parsed[0]
-    return (fields.get("PRETTY_NAME") or fields.get("NAME") or "Linux")[:160], (
-        fields.get("VERSION_ID") or None
-    )
+            fields[name] = parsed[0].strip()
+    os_name = fields.get("PRETTY_NAME") or fields.get("NAME")
+    if not os_name:
+        raise WorkerRuntimeError("Target did not report an OS release")
+    return os_name[:160], (fields.get("VERSION_ID") or None)
 
 
 def _packages(value: str) -> tuple[str, list[dict], bool]:
@@ -152,17 +191,24 @@ def _packages(value: str) -> tuple[str, list[dict], bool]:
     if not lines or lines[0] not in {"dpkg", "rpm", "none"}:
         raise WorkerRuntimeError("Unsupported Linux package manager response")
     manager = lines[0]
+    if manager == "none":
+        if len(lines) != 1:
+            raise WorkerRuntimeError("Unsupported Linux package manager response")
+        return manager, [], False
+    if len(lines) == 1:
+        raise WorkerRuntimeError("Package query returned no installed packages")
     packages: list[dict] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for line in lines[1:]:
         if "\t" not in line:
-            continue
+            raise WorkerRuntimeError("Package query returned malformed data")
         name, version = line.split("\t", 1)
         name, version = name.strip(), version.strip()
         if not name or not version or len(name) > 160 or len(version) > 160:
-            continue
-        if name not in seen:
-            seen.add(name)
+            raise WorkerRuntimeError("Package query returned malformed data")
+        identity = (name, version)
+        if identity not in seen:
+            seen.add(identity)
             packages.append({"name": name, "version": version})
     truncated = len(lines) - 1 > PACKAGE_LIMIT
     return manager, packages[:PACKAGE_LIMIT], truncated
@@ -185,7 +231,11 @@ def run_inventory(
         uname = _command(client, "uname -srm").strip().split()
         if len(uname) < 3 or uname[0] != "Linux":
             raise WorkerRuntimeError("Target did not report a Linux kernel")
-        hostname = _command(client, "hostname").strip().splitlines()[0]
+        on_tick(55, "Reading host")
+        hostnames = _command(client, "hostname").strip().splitlines()
+        if not hostnames:
+            raise WorkerRuntimeError("Target did not report a hostname")
+        hostname = hostnames[0]
         on_tick(70, "Reading packages")
         manager, packages, truncated = _packages(_command(client, PACKAGE_COMMAND))
         on_tick(95, "Validating")

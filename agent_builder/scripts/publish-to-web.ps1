@@ -23,6 +23,20 @@ if ($RequireSigned -and (Get-AuthenticodeSignature -FilePath $source).Status -ne
 if ($RequireSigned -and ($manifest.channel -ne 'production' -or -not $manifest.signed -or -not $manifest.includes_licensed_scanner)) {
     throw 'Refusing to publish an incomplete production release manifest.'
 }
+if ($RequireSigned) {
+    $headCommit = (& git -C $script:RepoRoot rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or $manifest.source_commit -ne $headCommit) {
+        throw 'Release manifest does not match the checked-out source commit.'
+    }
+    $sourceChanges = & git -C $script:RepoRoot status --porcelain=v1 --untracked-files=normal
+    if ($LASTEXITCODE -ne 0 -or $sourceChanges) {
+        throw 'Refusing to publish from a changed source tree.'
+    }
+    $signer = (Get-AuthenticodeSignature -FilePath $source).SignerCertificate
+    if (-not $signer -or $manifest.signer_thumbprint -ne $signer.Thumbprint.ToUpperInvariant()) {
+        throw 'Release manifest does not match the installer signer.'
+    }
+}
 New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
 Copy-Item -LiteralPath $source -Destination $destination -Force
 if ($sourceHash -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash) {

@@ -23,18 +23,5 @@
     "dashboard_url": "",
     "agent_api_url": ""
   },
-  "known_devices": [
-    {
-      "name": "",
-      "device_type": "",
-      "ipv4": "",
-      "expected_tcp_ports": []
-    },
-    {
-      "name": "",
-      "device_type": "",
-      "ipv4": "",
-      "expected_tcp_ports": []
-    }
-  ]
+  "known_devices": []
 }

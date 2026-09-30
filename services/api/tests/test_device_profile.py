@@ -71,6 +71,7 @@ def test_old_observation_recovers_from_exact_source_and_stale_snmp_is_labeled(
         {
             "discovery_id": str(uuid4()),
             "agent_id": agent["agent_id"],
+            "site_id": asset["site_id"],
             "created_at": now,
             "completed_at": now,
             "devices": [
@@ -95,6 +96,7 @@ def test_old_observation_recovers_from_exact_source_and_stale_snmp_is_labeled(
         {
             "discovery_id": str(uuid4()),
             "agent_id": agent["agent_id"],
+            "site_id": asset["site_id"],
             "created_at": now,
             "completed_at": now,
             "devices": [
@@ -125,11 +127,13 @@ def test_old_observation_recovers_from_exact_source_and_stale_snmp_is_labeled(
 
 def test_interface_snapshot_is_bounded(client: TestClient) -> None:
     agent, _discovery = completed_discovery(client)
+    asset = _first_asset(client)
     now = (datetime.now(UTC) + timedelta(seconds=1)).isoformat()
     client.app.state.asset_service.observe_discovery(
         {
             "discovery_id": str(uuid4()),
             "agent_id": agent["agent_id"],
+            "site_id": asset["site_id"],
             "created_at": now,
             "completed_at": now,
             "devices": [
@@ -146,7 +150,6 @@ def test_interface_snapshot_is_bounded(client: TestClient) -> None:
             ],
         }
     )
-    asset = _first_asset(client)
     profile = client.get(f"/api/assets/{asset['asset_id']}/device-profile").json()
     assert profile["snmp"]["reported_interface_count"] == 70
     assert len(profile["snmp"]["interfaces"]) == 64

@@ -64,6 +64,7 @@ def create_scan(
             discovery_id=str(discovery_id),
             device_ids=payload.device_ids,
             profile=payload.profile,
+            full_tcp_confirmed=payload.full_tcp_confirmed,
         )
     except ScanNotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Discovery not found") from exc

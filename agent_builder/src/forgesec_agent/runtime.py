@@ -47,7 +47,7 @@ def build_runtime(
     discovery = DiscoveryCommandHandler(nmap, heartbeat=heartbeat)
     scheduler = ScanScheduler(nmap, storage, paths.root / "scans")
     scan = ScanCommandHandler(scheduler, heartbeat)
-    diagnostics = DeviceDiagnosticHandler()
+    diagnostics = DeviceDiagnosticHandler(heartbeat)
     commands = CommandDispatcher(discovery, scan, diagnostics)
     return AgentRuntime(
         AgentLoop(

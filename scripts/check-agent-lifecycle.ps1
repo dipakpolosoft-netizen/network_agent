@@ -8,6 +8,9 @@ param(
     [string] $InstallDir = '',
     [string] $ExpectedAgentId = '',
     [string] $ExpectedVersion = '',
+    [string] $ExpectedCommit = '',
+    [string] $ExpectedSha256 = '',
+    [string] $ExpectedSignerThumbprint = '',
     [datetime] $NotBeforeUtc = [datetime]::MinValue,
     [switch] $RequireTray,
     [switch] $RequireProduction
@@ -99,8 +102,13 @@ if ($Stage -eq 'Preflight') {
         $hash = (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash
         Assert-Check ($release.sha256 -eq $hash -and $release.size_bytes -eq $installer.Length) 'Installer matches release.json hash and size'
         if ($RequireProduction) {
-            Assert-Check ($release.schema_version -eq 1 -and $release.channel -eq 'production' -and $release.signed -and $release.includes_licensed_scanner -and $release.nmap_oem_sha256 -match '^[0-9A-Fa-f]{64}$') 'Manifest declares a licensed production one-install package'
-            Assert-Check ((Get-AuthenticodeSignature -FilePath $InstallerPath).Status -eq 'Valid') 'Installer Authenticode signature is valid on this machine'
+            Assert-Check ($ExpectedSha256 -match '^[0-9A-Fa-f]{64}$' -and $hash -eq $ExpectedSha256) 'Installer matches the independently supplied build-host SHA-256'
+            Assert-Check ($ExpectedCommit -match '^[0-9A-Fa-f]{40}$' -and $release.source_commit -eq $ExpectedCommit) 'Manifest matches the independently approved source commit'
+            Assert-Check ($ExpectedSignerThumbprint -match '^[0-9A-Fa-f]{40}$') 'Approved signer thumbprint was supplied independently'
+            Assert-Check ($release.schema_version -eq 1 -and $release.channel -eq 'production' -and $release.signed -and $release.includes_licensed_scanner -and $release.nmap_oem_sha256 -match '^[0-9A-Fa-f]{64}$' -and $release.source_commit -match '^[0-9A-Fa-f]{40}$') 'Manifest declares a frozen licensed production package'
+            $signature = Get-AuthenticodeSignature -FilePath $InstallerPath
+            Assert-Check ($signature.Status -eq 'Valid') 'Installer Authenticode signature is valid on this machine'
+            Assert-Check ($signature.SignerCertificate -and $signature.SignerCertificate.Thumbprint -eq $ExpectedSignerThumbprint -and $release.signer_thumbprint -eq $ExpectedSignerThumbprint) 'Installer and manifest match the approved signer'
         } else {
             Assert-Check ($release.channel -eq 'development' -and -not $release.signed -and -not $release.includes_licensed_scanner) 'Package is clearly marked development-only'
         }
@@ -125,6 +133,10 @@ if ($Stage -eq 'Preflight') {
             try {
                 $health = Invoke-RestMethod -Uri "$($uri.AbsoluteUri.TrimEnd('/'))/health" -TimeoutSec 8
                 Assert-Check ($health.status -eq 'ok' -and $health.service -eq 'forgesec-api') 'API health responds from this pilot machine'
+                if ($RequireProduction) {
+                    $ready = Invoke-RestMethod -Uri "$($uri.AbsoluteUri.TrimEnd('/'))/ready" -TimeoutSec 8
+                    Assert-Check ($ready.status -eq 'ready') 'Production storage is ready from this pilot machine'
+                }
             } catch {
                 Assert-Check $false "API health responds from this pilot machine: $($_.Exception.Message)"
             }
@@ -141,9 +153,11 @@ if ($Stage -eq 'Installed') {
     Assert-Check (Test-Path -LiteralPath $installedAgent -PathType Leaf) 'Installed agent executable is present'
     Assert-Check (Test-Path -LiteralPath $installedTray -PathType Leaf) 'Installed tray executable is present'
     if ($RequireProduction) {
+        Assert-Check ($ExpectedSignerThumbprint -match '^[0-9A-Fa-f]{40}$') 'Approved signer thumbprint was supplied independently'
         foreach ($artifact in @($installedAgent, $installedTray)) {
             if (Test-Path -LiteralPath $artifact -PathType Leaf) {
-                Assert-Check ((Get-AuthenticodeSignature -FilePath $artifact).Status -eq 'Valid') "Installed signature is valid: $(Split-Path $artifact -Leaf)"
+                $signature = Get-AuthenticodeSignature -FilePath $artifact
+                Assert-Check ($signature.Status -eq 'Valid' -and $signature.SignerCertificate -and $signature.SignerCertificate.Thumbprint -eq $ExpectedSignerThumbprint) "Installed signature matches approved signer: $(Split-Path $artifact -Leaf)"
             }
         }
         Assert-Check ([bool](Get-ScannerPath)) 'Nmap is installed by the one-install package'

@@ -256,6 +256,7 @@ class WorkerService:
             asset is None
             or not asset.get("last_scan_id")
             or not asset.get("last_scan_at")
+            or asset.get("last_scan_status") != "completed"
         ):
             raise WorkerScopeError("Asset has no host-scan evidence")
         if utc_now() - parse_timestamp(asset["last_scan_at"]) > timedelta(
@@ -265,6 +266,8 @@ class WorkerService:
         scan = self.store.read("scans", asset["last_scan_id"])
         if scan is None:
             raise WorkerScopeError("Source scan is unavailable")
+        if scan.get("site_id") != asset["site_id"]:
+            raise WorkerScopeError("Source scan site does not match this asset")
         agent = self.store.read("agents", scan["agent_id"])
         if agent is None or agent.get("site_id") != asset["site_id"]:
             raise WorkerScopeError("Source scan does not belong to this site")
@@ -280,7 +283,7 @@ class WorkerService:
             for result in scan.get("results", [])
             if result["device_id"] in observed_device_ids
             and result["ip"] == asset["last_ip"]
-            and result["status"] in {"completed", "partial"}
+            and result["status"] == "completed"
         ]
         if not matching:
             raise WorkerScopeError("Asset IP has no matching successful scan")
@@ -468,7 +471,8 @@ class WorkerService:
                 raise WorkerNotFound
             advanced = job.get("assessment_profile") == "greenbone_single_host"
             inventory = job.get("inventory_profile") == "linux_ssh_readonly"
-            if not (advanced or inventory):
+            web_check = job.get("template_profile") == "http_baseline"
+            if not (advanced or inventory or web_check):
                 raise WorkerConflict("This job cannot be stopped here")
             if job["status"] not in {"queued", "leased"}:
                 raise WorkerConflict("Job is already finished")
@@ -476,7 +480,11 @@ class WorkerService:
             message = (
                 "Advanced assessment stopped by administrator"
                 if advanced
-                else "SSH inventory stopped by administrator"
+                else (
+                    "SSH inventory stopped by administrator"
+                    if inventory
+                    else "Web check stopped by operator"
+                )
             )
             job.update(
                 status="cancelled",
@@ -487,9 +495,15 @@ class WorkerService:
             self.store.write("scanner-worker-jobs", job_id, job)
             record_activity(
                 self.store,
-                event_type="greenbone_job.cancelled"
-                if advanced
-                else "inventory_job.cancelled",
+                event_type=(
+                    "greenbone_job.cancelled"
+                    if advanced
+                    else (
+                        "inventory_job.cancelled"
+                        if inventory
+                        else "nuclei_job.cancelled"
+                    )
+                ),
                 message=message,
                 actor_type="user" if actor_id else "server",
                 actor_id=actor_id,
@@ -512,10 +526,11 @@ class WorkerService:
 
     @staticmethod
     def _validate_nuclei_evidence(job: dict, result: WorkerResult) -> None:
-        if (
-            job.get("template_profile") != "http_baseline"
-            or result.status != "completed"
-        ):
+        if job.get("template_profile") != "http_baseline":
+            return
+        if result.status == "failed":
+            if result.evidence:
+                raise WorkerConflict("Failed web checks cannot upload evidence")
             return
         try:
             evidence = NucleiEvidence.model_validate(result.evidence)
@@ -583,9 +598,8 @@ class WorkerService:
             raise WorkerConflict("Invalid SSH inventory evidence") from exc
         if evidence.target_ip != job["target_ip"]:
             raise WorkerConflict("Inventory evidence target does not match the job")
-        if len({package.name for package in evidence.packages}) != len(
-            evidence.packages
-        ):
+        identities = {(item.name, item.version) for item in evidence.packages}
+        if len(identities) != len(evidence.packages):
             raise WorkerConflict("Inventory has duplicate packages")
 
     def _release(self, job: dict, *, reason: str = "Worker lease expired") -> None:
@@ -639,7 +653,7 @@ class WorkerService:
                 ):
                     job.update(
                         status="cancelled",
-                        summary="Site scope approval was removed",
+                        summary="Site scope approval is inactive",
                         completed_at=isoformat(now),
                         updated_at=isoformat(now),
                     )
@@ -691,7 +705,7 @@ class WorkerService:
         if not self.sites.approved(job["site_id"], job["target_ip"], job["profile"]):
             job.update(
                 status="cancelled",
-                summary="Site scope approval was removed",
+                summary="Site scope approval is inactive",
                 completed_at=isoformat(utc_now()),
                 updated_at=isoformat(utc_now()),
             )

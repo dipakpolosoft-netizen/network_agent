@@ -18,7 +18,13 @@ from forgesec_api.storage import SAFE_COMPONENT, InvalidStorageKey, JsonStore
 class PostgresStore(JsonStore):
     def __init__(self, root: Path, database_url: str):
         super().__init__(root)
-        self.pool = ConnectionPool(database_url, min_size=1, max_size=8, open=False)
+        self.pool = ConnectionPool(
+            database_url,
+            min_size=1,
+            max_size=8,
+            open=False,
+            check=ConnectionPool.check_connection,
+        )
         self._local = threading.local()
 
     def initialize(self) -> None:

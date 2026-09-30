@@ -275,7 +275,7 @@ class AgentService:
                 pass
         if record.get("site_id"):
             approved_scopes = [
-                scope["cidr"] for scope in self.sites.list_scopes(record["site_id"])
+                scope["cidr"] for scope in self.sites.policy(record["site_id"])
             ]
             approved_discovery_scopes = [
                 scope

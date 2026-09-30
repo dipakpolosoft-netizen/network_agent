@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from forgesec_api.models import StrictModel
 
@@ -17,6 +17,19 @@ class ScanCreateRequest(StrictModel):
     device_ids: list[str] = Field(min_length=1, max_length=4096)
     profile: ScanProfile = "inventory"
     authorization_confirmed: Literal[True]
+    full_tcp_confirmed: bool = False
+
+
+class ScanProfilePlan(StrictModel):
+    tcp_top_ports: int | None = Field(default=None, ge=1)
+    tcp_all_ports: bool
+    tcp_ports: list[int]
+    udp_ports: list[int]
+    version_detection: Literal["light", "full"]
+    os_detection: Literal["when_privileged", "not_requested"]
+    host_timeout_seconds: int = Field(ge=1)
+    assume_host_up: bool
+    open_only_output: bool
 
 
 class ScanCreateResponse(StrictModel):
@@ -71,6 +84,8 @@ class PortResult(StrictModel):
     confidence: int | None = Field(default=None, ge=0, le=10)
     cpe: str | None = None
     cpes: list[str] = Field(default_factory=list, max_length=16)
+    evidence_source: Literal["nmap"] | None = None
+    recorded_at: datetime | None = None
 
 
 class OsMatch(StrictModel):
@@ -104,7 +119,11 @@ class ScanSummary(StrictModel):
     network_devices: int = Field(default=0, ge=0)
     servers: int = Field(default=0, ge=0)
     workstations: int = Field(default=0, ge=0)
+    timed_out_hosts: int = Field(default=0, ge=0)
+    failed_hosts: int = Field(default=0, ge=0)
     open_ports: int = Field(default=0, ge=0)
+    open_filtered_ports: int = Field(default=0, ge=0)
+    filtered_ports: int = Field(default=0, ge=0)
     tcp_ports: int = Field(default=0, ge=0)
     udp_ports: int = Field(default=0, ge=0)
     service_fingerprints: int = Field(default=0, ge=0)
@@ -150,12 +169,16 @@ class ScanChangeSummary(StrictModel):
     missing_host_count: int = Field(default=0, ge=0)
     opened_port_count: int = Field(default=0, ge=0)
     closed_port_count: int = Field(default=0, ge=0)
+    no_longer_confirmed_port_count: int = Field(default=0, ge=0)
     new_finding_count: int = Field(default=0, ge=0)
     resolved_finding_count: int = Field(default=0, ge=0)
     new_hosts: list[ChangedHost] = Field(default_factory=list, max_length=128)
     missing_hosts: list[ChangedHost] = Field(default_factory=list, max_length=128)
     opened_ports: list[ChangedPort] = Field(default_factory=list, max_length=128)
     closed_ports: list[ChangedPort] = Field(default_factory=list, max_length=128)
+    no_longer_confirmed_ports: list[ChangedPort] = Field(
+        default_factory=list, max_length=128
+    )
     new_findings: list[ChangedFinding] = Field(default_factory=list, max_length=128)
     resolved_findings: list[ChangedFinding] = Field(
         default_factory=list,
@@ -191,12 +214,25 @@ class HostScanResult(StrictModel):
     started_at: datetime
     completed_at: datetime | None
     hostname: str | None = None
+    hostname_source: Literal["nmap", "discovery", "snmp"] | None = None
     device_type: str | None = None
     classification_confidence: float | None = Field(default=None, ge=0, le=1)
     ports: list[PortResult] = Field(max_length=65535)
     os_matches: list[OsMatch] = Field(max_length=32)
     exposure_flags: list[ExposureFlag] = Field(max_length=128)
+    raw_xml_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     error: str | None = Field(default=None, max_length=4096)
+
+    @field_validator("ports")
+    @classmethod
+    def unique_ports(cls, ports: list[PortResult]) -> list[PortResult]:
+        seen: set[tuple[str, int]] = set()
+        for port in ports:
+            key = (port.protocol, port.port)
+            if key in seen:
+                raise ValueError(f"Duplicate {port.port}/{port.protocol} port evidence")
+            seen.add(key)
+        return ports
 
 
 class ScanProgress(StrictModel):
@@ -209,6 +245,7 @@ class ScanProgress(StrictModel):
     total: int = Field(ge=1, le=4096)
     queued: int = Field(ge=0, le=4096)
     running: int = Field(ge=0, le=3)
+    running_device_ids: list[str] = Field(default_factory=list, max_length=3)
     completed: int = Field(ge=0, le=4096)
     failed: int = Field(ge=0, le=4096)
     cancelled: int = Field(ge=0, le=4096)
@@ -220,12 +257,29 @@ class ScanControlResponse(StrictModel):
     cancel_requested: bool
 
 
+class ScanOrigin(StrictModel):
+    agent_id: UUID
+    label: str
+    hostname: str
+    local_ip: str | None = None
+    subnet: str | None = None
+    site_name: str | None = None
+    os_name: str
+    agent_version: str
+    discovery_interface: str | None = None
+    last_heartbeat_at: datetime | None = None
+    source: Literal["scan_snapshot", "current_heartbeat"]
+
+
 class ScanPublic(StrictModel):
     scan_id: UUID
     command_id: UUID
     discovery_id: UUID
     agent_id: UUID
+    site_id: UUID | None = None
+    scan_origin: ScanOrigin | None = None
     profile: ScanProfile
+    profile_plan: ScanProfilePlan | None = None
     status: str
     total: int
     queued: int
@@ -235,6 +289,7 @@ class ScanPublic(StrictModel):
     cancelled: int
     cancel_requested: bool
     stage: str | None
+    last_progress_at: datetime | None = None
     targets: list[ScanTarget]
     results: list[HostScanResult]
     summary: ScanSummary = Field(default_factory=ScanSummary)

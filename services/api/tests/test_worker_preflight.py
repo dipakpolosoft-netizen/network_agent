@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import subprocess
 from uuid import uuid4
 
-from forgesec_api.workers import check_runtime
+import pytest
+
+from forgesec_api.workers import check_runtime, nuclei_runtime
 
 
 def test_nuclei_preflight_accepts_local_configuration(monkeypatch, tmp_path) -> None:
@@ -14,7 +17,57 @@ def test_nuclei_preflight_accepts_local_configuration(monkeypatch, tmp_path) -> 
     monkeypatch.setenv("FORGESEC_WORKER_ID", str(uuid4()))
     monkeypatch.setenv("FORGESEC_WORKER_CREDENTIAL", "test-credential")
     monkeypatch.setenv("FORGESEC_NUCLEI_BINARY", str(binary))
+    calls = []
+
+    def version_check(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command, 0, "Nuclei Engine Version: v3.0.0", ""
+        )
+
+    monkeypatch.setattr(nuclei_runtime.subprocess, "run", version_check)
     assert check_runtime.local_issues("nuclei") == []
+    assert calls[0][0] == [str(binary.resolve()), "-version"]
+    assert "FORGESEC_WORKER_CREDENTIAL" not in calls[0][1]["env"]
+    assert calls[0][1]["timeout"] == 8
+
+
+@pytest.mark.parametrize(
+    ("returncode", "output"),
+    [(1, "Nuclei failed"), (0, "Other scanner v1.0.0")],
+)
+def test_nuclei_preflight_rejects_wrong_or_failing_binary(
+    monkeypatch, tmp_path, returncode, output
+) -> None:
+    binary = tmp_path / "nuclei"
+    binary.write_bytes(b"test binary")
+    monkeypatch.setenv("FORGESEC_NUCLEI_BINARY", str(binary))
+    monkeypatch.setattr(
+        nuclei_runtime.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], returncode, output, ""
+        ),
+    )
+    assert any(
+        "did not identify Nuclei" in issue
+        for issue in check_runtime.local_issues("nuclei")
+    )
+
+
+def test_nuclei_preflight_rejects_hung_binary(monkeypatch, tmp_path) -> None:
+    binary = tmp_path / "nuclei"
+    binary.write_bytes(b"test binary")
+    monkeypatch.setenv("FORGESEC_NUCLEI_BINARY", str(binary))
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(nuclei_runtime.subprocess, "run", timeout)
+    assert any(
+        "version check could not run" in issue
+        for issue in check_runtime.local_issues("nuclei")
+    )
 
 
 def test_preflight_rejects_missing_identity_and_engine(monkeypatch) -> None:
@@ -37,6 +90,13 @@ def test_preflight_rejects_insecure_remote_url(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("FORGESEC_WORKER_ID", str(uuid4()))
     monkeypatch.setenv("FORGESEC_WORKER_CREDENTIAL", "test-credential")
     monkeypatch.setenv("FORGESEC_NUCLEI_BINARY", str(binary))
+    monkeypatch.setattr(
+        nuclei_runtime.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, "Nuclei Engine Version: v3.0.0", ""
+        ),
+    )
     assert any("API URL" in issue for issue in check_runtime.local_issues("nuclei"))
 
 

@@ -20,7 +20,7 @@ from forgesec_api.dependencies import (
     get_command_service,
     get_site_service,
 )
-from forgesec_api.sites.service import SiteService
+from forgesec_api.sites.service import DIAGNOSTIC_SCAN_PROFILES, SiteService
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 AgentServiceDependency = Annotated[AgentService, Depends(get_agent_service)]
@@ -98,10 +98,16 @@ def create_agent_diagnostic(
             status_code=status.HTTP_409_CONFLICT,
             detail="Agent is offline",
         )
-    if not sites.approved(agent.get("site_id"), payload.target_ip):
+    if payload.diagnostic_type == "full_tcp_nmap" and not payload.full_tcp_confirmed:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "Diagnostic target is outside the site's approved scope",
+            "Full TCP host check requires separate confirmation",
+        )
+    profile = DIAGNOSTIC_SCAN_PROFILES.get(payload.diagnostic_type)
+    if not sites.approved(agent.get("site_id"), payload.target_ip, profile):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Diagnostic target or profile is outside the site's approved scope",
         )
     command = commands.create(
         agent_id=str(agent_id),
@@ -109,6 +115,7 @@ def create_agent_diagnostic(
         payload={
             "target_ip": payload.target_ip,
             "diagnostic_type": payload.diagnostic_type,
+            "full_tcp_confirmed": payload.full_tcp_confirmed,
             "scope_policy": sites.policy(agent.get("site_id")),
         },
     )

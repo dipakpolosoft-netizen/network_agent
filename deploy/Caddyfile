@@ -1,7 +1,7 @@
 {$FORGESEC_PUBLIC_HOST} {
     encode zstd gzip
 
-    @machine path /agent/* /worker/* /health
+    @machine path /agent/* /worker/* /health /ready
     handle @machine {
         reverse_proxy api:8000
     }

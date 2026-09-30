@@ -17,29 +17,66 @@ a broad network simply to make a segment selectable. A public/nonprivate
 range needs its separate written approval and UI confirmation.
 
 Choose two or three known devices with confirmed IPs for the baseline. At
-least the device selected for the host scan should expose a known TCP port
-covered by the chosen profile. `inventory` checks Nmap's top 200 ports;
+least one device must expose a known open TCP port; select that device for
+the host scan. The port must be covered by the chosen profile. `inventory`
+checks Nmap's top 200 ports;
 `standard` checks its top 1000. Neither is an all-port scan. Record any host
 firewall rules or routing that may make an otherwise powered-on device
 invisible.
 
+Before this accuracy pilot, validate the known-device baseline separately:
+
+```powershell
+python .\scripts\check_pilot_plan.py .\docs\pilot-plan.local.json --mode accuracy
+```
+
 ## 2. Discover one segment
 
 Select the planned probe and the **selected** planned segment in **Network
-Scanner**. Confirm authorization and start discovery once. Record the
-discovery ID, start/completion times, scope, progress events, found count,
-error/partial status, and a screenshot of the resulting device list. Wait for
-`completed`; do not rerun against other segments to hide a missed baseline
-device. Compare each known IP, hostname if available, MAC/vendor if available,
+Scanner**. Enter the two or three baseline IPs in **Known hosts to verify**,
+confirm authorization, and start discovery once. This field is optional for
+ordinary discovery but required for this first accuracy pilot.
+Only missing named IPs receive a bounded TCP/ICMP follow-up; it is not a
+port or vulnerability scan. Nmap's normal local-segment discovery may use
+ARP, while the targeted pass explicitly uses IP probes
+([Nmap host discovery](https://nmap.org/book/man-host-discovery.html)).
+Do not interpret a non-response as proof a device is offline. Record the
+method, reason, timestamp, and result for every known IP; a targeted recovery
+is an initial-discovery miss that needs explanation.
+
+Record the discovery ID, start/completion times, scope, progress events,
+found count, error/partial status, and a screenshot of the resulting device
+list. Wait for `completed`; do not rerun against other segments to hide a
+missed baseline device. Compare each known IP, hostname if available,
+MAC/vendor if available,
 and device classification. Unknown hostname or device type is a review item,
 not proof that the host is absent. Any unexpected device requires independent
 confirmation before calling it a false positive.
+
+If Nmap times out, complete host records already observed may still be saved.
+The scope remains failed and the discovery is **partial**, not evidence of full
+segment coverage. Review the initially observed versus recovered known-host
+counts and keep no-response hosts as unconfirmed; investigate the timeout
+before repeating the approved segment.
+
+For the device-identity gate, compare the saved hostname, MAC, vendor, role
+estimate, and last-seen time with independent records for known PCs,
+servers, switches, routers, and firewalls across authorized pilots where
+available. A MAC vendor is not
+proof of a device role; a generic open web/SSH port or OS family is not
+proof of a server. Record conflicting or missing clues as Unknown/uncertain
+instead of forcing a type. Recheck one known device after a later scan to
+confirm a weak result has not erased a stronger earlier identity.
+If a DNS, NetBIOS, or SNMP lookup fails, the already discovered IP must remain
+visible with its original discovery method and last-seen time; missing identity
+fields and an Unknown role are preferable to losing the host record.
 
 ## 3. Scan one known target
 
 Select **one** authorized, discovered non-probe device. Use the approved
 `inventory` or `standard` profile and start the scan. Record scan ID,
-progress/queue transitions, completion state, target IP, open ports, service
+progress/queue transitions, completion state, target IP, confirmed-open ports
+and any `open|filtered` or filtered observations, service
 names and versions, OS guesses, and any errors. Do not treat service versions,
 OS guesses, CPE/CVE matches, or device role as verified facts without
 independent confirmation. If the selected host times out or a known port is
@@ -52,6 +89,14 @@ with the evidence. Test cancellation only on another separately authorized
 small job; record whether its final state and report clearly show partial or
 cancelled work. Do not use `full_tcp`, Greenbone, or broad multi-segment jobs
 for this first accuracy gate.
+
+Compare the probe shown in Scanner, Assets > Topology, Scan History, and the
+report's scan-origin section. The saved JSON and PDF should name the same
+probe ID, hostname, OS, version, queued-snapshot IP/subnet, and heartbeat as the
+report. The live Scanner and Topology views may show a newer heartbeat or IP;
+do not overwrite historical scan-origin facts with them. A legacy report
+using the latest probe record must say that its scan-time IP is unverified.
+The probe must not appear as a scanned asset or count as a target.
 
 ## 4. Compare saved evidence offline
 
@@ -72,15 +117,45 @@ From the repository root, with actual paths substituted:
   --scan .\.tmp\forgesec-scan-<scan-id>.json
 ```
 
-Without `--plan`, the command performs only a structural audit. It checks
-discovery/scan linkage, selected targets, out-of-scope IPs, and result
-consistency, but **cannot** say whether devices or ports were correctly
+Without `--plan`, the command performs a structural audit. It checks
+discovery/scan linkage, selected targets, out-of-scope IPs, duplicate port
+rows, and whether the saved summary matches the raw port states, but **cannot**
+say whether devices or ports were correctly
 detected. With a valid plan, every `FAIL` and `REVIEW` needs investigation.
 The evaluator requires a completed single-segment discovery and completed
-single-target scan, checks all known IPs, and checks the expected open TCP
-ports of the scanned target. If a known port falls outside the selected
-profile, change the planned test target or obtain explicit authorization
+single-target scan of the device with a known open TCP port. It checks all
+known IPs, saved known-host outcomes when requested, the selected target's
+expected open TCP ports, and summary counts
+against raw `open`, `open|filtered`, and `filtered` port states. It also checks
+the saved authorization flag, exact completed scope, and requested port plan;
+it rejects a broadened or missing first-pilot plan. A report from
+an API that predates those separate counters cannot pass this gate. If a known
+port falls outside the selected profile, change the planned test target or obtain explicit authorization
 for a different profile; do not silently broaden the scan.
+
+For Step 9, compare one completed host result against the exact raw Nmap XML
+saved on the same probe. Get the scan JSON from the report; find the selected
+`device_id` in its `targets` and `results`. On that probe, run from the repo
+root (substitute the scan and device IDs):
+
+```powershell
+.\agent_builder\.venv\Scripts\python.exe .\agent_builder\scripts\verify-host-evidence.py `
+  --scan .\.tmp\forgesec-scan-<scan-id>.json `
+  --xml "$env:ProgramData\ForgeSec\NetworkAgent\scans\<scan-id>\raw\<device-id>.xml" `
+  --device-id "<device-id>"
+```
+
+The read-only verifier checks the XML SHA-256, selected IP, hostname source,
+port states and fingerprints, OS estimates, and role estimate against the
+exported result. For a one-target scan, it also checks the report's host and
+port-state totals against that XML. New probe results include this fingerprint;
+older results without it cannot pass this exact-byte check. The raw XML remains on the probe
+and can contain sensitive service data. Run the check from an authorized
+elevated shell if the installed probe's scan-data ACL blocks your account;
+do not relax that ACL or commit XML to source control. A matching hash proves
+the export corresponds to these XML bytes, not that Nmap identified the real
+device or version correctly. Compare
+important claims with the known-device baseline separately.
 
 ## Exit gate
 

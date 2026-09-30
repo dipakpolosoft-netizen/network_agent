@@ -40,8 +40,8 @@ def valid_plan() -> dict:
 
 
 class PilotPlanTests(unittest.TestCase):
-    def check(self, plan: dict) -> list[str]:
-        return validate(plan, today=date(2026, 9, 25))
+    def check(self, plan: dict, *, mode: str = "authorization") -> list[str]:
+        return validate(plan, today=date(2026, 9, 25), mode=mode)
 
     def test_valid_private_scope(self) -> None:
         self.assertEqual(self.check(valid_plan()), [])
@@ -71,20 +71,36 @@ class PilotPlanTests(unittest.TestCase):
     def test_known_devices_must_be_inside_and_not_excluded(self) -> None:
         plan = valid_plan()
         plan["known_devices"][0]["ipv4"] = "192.168.0.20"
-        self.assertIn("first discovery segment", " ".join(self.check(plan)))
+        self.assertIn("first discovery segment", " ".join(self.check(plan, mode="accuracy")))
         plan["known_devices"][0]["ipv4"] = "192.168.1.20"
         plan["approval"]["exclusions"] = ["192.168.1.20/32"]
-        self.assertIn("excluded", " ".join(self.check(plan)))
+        self.assertIn("excluded", " ".join(self.check(plan, mode="accuracy")))
 
     def test_probe_cannot_be_excluded(self) -> None:
         plan = valid_plan()
         plan["approval"]["exclusions"] = ["192.168.1.10/32"]
         self.assertIn("probe.ipv4 is excluded", " ".join(self.check(plan)))
 
+    def test_discovery_allows_narrow_host_exclusion(self) -> None:
+        plan = valid_plan()
+        plan["approval"]["exclusions"] = ["192.168.1.99/32"]
+        self.assertEqual(self.check(plan, mode="accuracy"), [])
+
+    def test_discovery_rejects_completely_excluded_segment(self) -> None:
+        plan = valid_plan()
+        plan["approval"]["exclusions"] = [
+            "192.168.1.0/25",
+            "192.168.1.128/25",
+        ]
+        self.assertIn(
+            "Exclusions cover the entire first discovery segment",
+            " ".join(self.check(plan)),
+        )
+
     def test_remote_probe_cannot_use_localhost_or_plain_http(self) -> None:
         plan = valid_plan()
         plan["server"]["agent_api_url"] = "http://127.0.0.1:8000"
-        errors = " ".join(self.check(plan))
+        errors = " ".join(self.check(plan, mode="accuracy"))
         self.assertIn("separate pilot machine", errors)
         self.assertIn("HTTPS", errors)
         plan["server"]["agent_api_url"] = "http://api.lab.example"
@@ -100,9 +116,32 @@ class PilotPlanTests(unittest.TestCase):
         plan = copy.deepcopy(valid_plan())
         plan["approval"]["expires_on"] = "2026-09-24"
         plan["known_devices"][0]["expected_tcp_ports"] = [0]
-        errors = " ".join(self.check(plan))
+        errors = " ".join(self.check(plan, mode="accuracy"))
         self.assertIn("has passed", errors)
         self.assertIn("1-65535", errors)
+
+    def test_pilot_needs_a_known_open_tcp_port(self) -> None:
+        plan = valid_plan()
+        plan["known_devices"][0]["expected_tcp_ports"] = []
+        self.assertIn("expected open TCP port", " ".join(self.check(plan, mode="accuracy")))
+
+    def test_authorization_does_not_require_known_devices(self) -> None:
+        plan = valid_plan()
+        plan.pop("known_devices")
+        self.assertEqual(self.check(plan), [])
+        self.assertIn("known_devices", " ".join(self.check(plan, mode="accuracy")))
+
+    def test_literal_template_placeholders_are_rejected(self) -> None:
+        plan = valid_plan()
+        plan["site"]["owner"] = "ACTUAL_NETWORK_OWNER"
+        plan["approval"]["reference"] = "ACTUAL_WRITTEN_APPROVAL_REFERENCE"
+        plan["known_devices"][0]["name"] = "ACTUAL_DEVICE_NAME"
+        plan["known_devices"][1]["device_type"] = "ANOTHER_ACTUAL_DEVICE_TYPE"
+        errors = " ".join(self.check(plan, mode="accuracy"))
+        self.assertIn("site.owner needs a real value", errors)
+        self.assertIn("approval.reference needs a real value", errors)
+        self.assertIn("known_devices[0] needs a real name", errors)
+        self.assertIn("known_devices[1] needs a real name", errors)
 
 
 if __name__ == "__main__":

@@ -6,10 +6,18 @@ import copy
 import hashlib
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from check_final_acceptance import REQUIRED_GATES, REQUIRED_V1_WORKERS, validate_artifacts, validate_evidence
+from check_final_acceptance import (
+    REQUIRED_GATES,
+    REQUIRED_V1_WORKERS,
+    _signature_identity,
+    validate_artifacts,
+    validate_evidence,
+)
 
 
 def _manifest(payload: bytes) -> dict:
@@ -24,6 +32,8 @@ def _manifest(payload: bytes) -> dict:
         "signed": True,
         "includes_licensed_scanner": True,
         "nmap_oem_sha256": "A" * 64,
+        "source_commit": "b" * 40,
+        "signer_thumbprint": "C" * 40,
     }
 
 
@@ -33,11 +43,19 @@ def _evidence(manifest: dict) -> dict:
         "release_scope": "v1_full_suite",
         "customer_id": "pilot-customer",
         "release_sha256": manifest["sha256"],
-        "gates": {name: {"status": "pass", "evidence": f"TICKET-{name}"} for name in REQUIRED_GATES},
-        "workers": {name: {"status": "pass", "evidence": f"PILOT-{name}"} for name in REQUIRED_V1_WORKERS},
+        "release_commit": manifest["source_commit"],
+        "gates": {
+            name: {"status": "pass", "evidence": f"TICKET-{name}"}
+            for name in REQUIRED_GATES
+        },
+        "workers": {
+            name: {"status": "pass", "evidence": f"PILOT-{name}"}
+            for name in REQUIRED_V1_WORKERS
+        },
         "signoff": {
-            "decision": "approved", "approver": "Release owner",
-            "approved_at_utc": datetime.now(timezone.utc).isoformat(),
+            "decision": "approved",
+            "approver": "Release owner",
+            "approved_at_utc": datetime.now(UTC).isoformat(),
         },
     }
 
@@ -52,10 +70,64 @@ class FinalAcceptanceTests(unittest.TestCase):
             published = root / "published.exe"
             built.write_bytes(payload)
             published.write_bytes(payload)
-            self.assertEqual(validate_artifacts(manifest, copy.deepcopy(manifest), built, published, signature_status="Valid"), [])
-            self.assertIn("Authenticode", " ".join(validate_artifacts(manifest, manifest, built, published, signature_status="NotSigned")))
+            self.assertEqual(
+                validate_artifacts(
+                    manifest,
+                    copy.deepcopy(manifest),
+                    built,
+                    published,
+                    signature_status="Valid",
+                    signer_thumbprint="C" * 40,
+                ),
+                [],
+            )
+            self.assertIn(
+                "signer differs",
+                " ".join(
+                    validate_artifacts(
+                        manifest,
+                        manifest,
+                        built,
+                        published,
+                        signature_status="Valid",
+                        signer_thumbprint="D" * 40,
+                    )
+                ),
+            )
+            self.assertIn(
+                "Authenticode",
+                " ".join(
+                    validate_artifacts(
+                        manifest,
+                        manifest,
+                        built,
+                        published,
+                        signature_status="NotSigned",
+                    )
+                ),
+            )
             published.write_bytes(b"different")
-            self.assertIn("SHA-256", " ".join(validate_artifacts(manifest, manifest, built, published, signature_status="Valid")))
+            self.assertIn(
+                "SHA-256",
+                " ".join(
+                    validate_artifacts(
+                        manifest, manifest, built, published, signature_status="Valid"
+                    )
+                ),
+            )
+
+    def test_authenticode_identity_is_read_from_installer(self) -> None:
+        with patch(
+            "check_final_acceptance.subprocess.run",
+            return_value=SimpleNamespace(
+                returncode=0,
+                stdout='{"status":"Valid","thumbprint":"' + "C" * 40 + '"}',
+                stderr="",
+            ),
+        ) as run:
+            identity = _signature_identity(Path("published.exe"))
+        self.assertEqual(identity, ("Valid", "C" * 40))
+        self.assertIn("Get-AuthenticodeSignature", run.call_args.args[0][-1])
 
     def test_development_and_manifest_mismatch_are_rejected(self) -> None:
         payload = b"test package"
@@ -66,10 +138,29 @@ class FinalAcceptanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             built = Path(directory) / manifest["file"]
             built.write_bytes(payload)
-            errors = validate_artifacts(manifest, published_manifest, built, built, signature_status="Valid")
+            errors = validate_artifacts(
+                manifest, published_manifest, built, built, signature_status="Valid"
+            )
             self.assertIn("not production", " ".join(errors))
             published_manifest["version"] = "1.2.4"
-            self.assertIn("differs", " ".join(validate_artifacts(manifest, published_manifest, built, built)))
+            self.assertIn(
+                "differs",
+                " ".join(
+                    validate_artifacts(manifest, published_manifest, built, built)
+                ),
+            )
+
+    def test_missing_provenance_is_rejected(self) -> None:
+        payload = b"test signed package"
+        manifest = _manifest(payload)
+        manifest.pop("source_commit")
+        manifest.pop("signer_thumbprint")
+        with tempfile.TemporaryDirectory() as directory:
+            built = Path(directory) / manifest["file"]
+            built.write_bytes(payload)
+            errors = " ".join(validate_artifacts(manifest, manifest, built, built))
+        self.assertIn("source commit", errors)
+        self.assertIn("signer thumbprint", errors)
 
     def test_all_required_evidence_passes(self) -> None:
         manifest = _manifest(b"package")
@@ -79,18 +170,28 @@ class FinalAcceptanceTests(unittest.TestCase):
         manifest = _manifest(b"package")
         evidence = _evidence(manifest)
         evidence["release_sha256"] = "0" * 64
+        evidence["release_commit"] = "0" * 40
         evidence["gates"]["agent_lifecycle"] = {"status": "not_tested", "evidence": ""}
         evidence["workers"]["nuclei"] = {"status": "pass", "evidence": ""}
         evidence["signoff"]["decision"] = "pending"
         errors = " ".join(validate_evidence(evidence, manifest))
-        for expected in ("SHA-256", "agent_lifecycle", "nuclei", "approval"):
+        for expected in (
+            "SHA-256",
+            "source commit",
+            "agent_lifecycle",
+            "nuclei",
+            "approval",
+        ):
             self.assertIn(expected, errors)
 
     def test_full_suite_cannot_skip_a_worker_or_scope(self) -> None:
         manifest = _manifest(b"package")
         evidence = _evidence(manifest)
         evidence["release_scope"] = "core"
-        evidence["workers"]["greenbone"] = {"status": "not_deployed", "evidence": "Deferred"}
+        evidence["workers"]["greenbone"] = {
+            "status": "not_deployed",
+            "evidence": "Deferred",
+        }
         errors = " ".join(validate_evidence(evidence, manifest))
         self.assertIn("v1_full_suite", errors)
         self.assertIn("greenbone", errors)

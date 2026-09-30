@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import random
 import socket
@@ -12,6 +13,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from forgesec_agent.scanning.classifier import classify_discovered_device
+
+LOGGER = logging.getLogger(__name__)
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 SYS_DESCR = "1.3.6.1.2.1.1.1.0"
@@ -103,7 +106,15 @@ class DeviceEnricher:
             }
             enriched = [dict(device) for device in devices]
             for future in as_completed(futures):
-                enriched[futures[future]] = future.result()
+                index = futures[future]
+                try:
+                    enriched[index] = future.result()
+                except Exception:
+                    LOGGER.exception(
+                        "Identity enrichment failed for %s", devices[index].get("ip")
+                    )
+                    enriched[index].setdefault("device_type", "unknown")
+                    enriched[index].setdefault("classification_confidence", 0.0)
         return enriched
 
     def _enrich_one(self, device: dict[str, Any]) -> dict[str, Any]:
@@ -111,12 +122,14 @@ class DeviceEnricher:
         if not ip:
             return device
         if not _clean(device.get("hostname")):
-            hostname = _clean(self.reverse_lookup(ip)) or _clean(
-                self.netbios_lookup(ip)
+            hostname = _clean(
+                self._lookup(self.reverse_lookup, ip, "reverse DNS")
+            ) or _clean(
+                self._lookup(self.netbios_lookup, ip, "NetBIOS")
             )
             if hostname:
                 device["hostname"] = hostname
-        snmp = self.snmp_lookup(ip)
+        snmp = self._lookup(self.snmp_lookup, ip, "SNMP")
         if snmp:
             device["snmp_name"] = _clean(snmp.name)
             device["snmp_description"] = _clean(snmp.description, max_length=512)
@@ -159,6 +172,19 @@ class DeviceEnricher:
         device["device_type"] = device_type
         device["classification_confidence"] = confidence
         return device
+
+    @staticmethod
+    def _lookup(lookup: Callable[[str], Any], ip: str, source: str) -> Any:
+        try:
+            return lookup(ip)
+        except Exception as exc:
+            LOGGER.warning(
+                "%s identity lookup failed for %s (%s)",
+                source,
+                ip,
+                type(exc).__name__,
+            )
+            return None
 
 
 def reverse_dns_name(ip: str) -> str | None:
@@ -302,7 +328,7 @@ def _snmp_walk_raw(
 ) -> dict[str, tuple[int, bytes]] | None:
     values: dict[str, tuple[int, bytes]] = {}
     current_oid = base_oid
-    for _ in range(max(0, limit)):
+    for index in range(max(0, limit) + int(require_complete)):
         packet = _snmp_get_next_request(community, current_oid)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.settimeout(timeout)
@@ -319,6 +345,10 @@ def _snmp_walk_raw(
         next_oid, value = next(iter(response.items()))
         if not _in_oid_tree(next_oid, base_oid):
             break
+        if _oid_parts(next_oid) <= _oid_parts(current_oid):
+            return None if require_complete else (values if values else None)
+        if index >= limit:
+            return None
         values[next_oid] = value
         current_oid = next_oid
     return values
@@ -356,6 +386,12 @@ def _lldp_identity(
     )
     if subtypes is None or chassis_ids is None:
         return subtype, chassis_id, False, ()
+    subtype_rows = {
+        oid.removeprefix(f"{LLDP_REM_CHASSIS_SUBTYPE}.") for oid in subtypes
+    }
+    chassis_rows = {oid.removeprefix(f"{LLDP_REM_CHASSIS_ID}.") for oid in chassis_ids}
+    if subtype_rows != chassis_rows:
+        return subtype, chassis_id, False, ()
     remote_ports = _snmp_walk_raw(ip, community, LLDP_REM_PORT_ID, timeout, limit) or {}
     remote_port_subtypes = (
         _snmp_walk_raw(ip, community, LLDP_REM_PORT_SUBTYPE, timeout, limit) or {}
@@ -370,14 +406,14 @@ def _lldp_identity(
         suffix = oid.removeprefix(f"{LLDP_REM_CHASSIS_ID}.")
         parts = suffix.split(".")
         if len(parts) != 3 or not all(part.isdigit() for part in parts):
-            continue
+            return subtype, chassis_id, False, ()
         local_number = int(parts[1])
         if local_number < 1 or local_number > 4096 or remote_chassis[0] != 0x04:
-            continue
+            return subtype, chassis_id, False, ()
         remote_subtype = _raw_int(subtypes.get(f"{LLDP_REM_CHASSIS_SUBTYPE}.{suffix}"))
         remote_id = remote_chassis[1].hex()
         if remote_subtype not in range(1, 8) or not remote_id or len(remote_id) > 510:
-            continue
+            return subtype, chassis_id, False, ()
         port = _display_lldp_id(local_ports.get(f"{LLDP_LOC_PORT_ID}.{local_number}"))
         local_port = port or f"Port {local_number}"
         key = (local_number, remote_id, suffix)
@@ -627,6 +663,13 @@ def _snmp_communities() -> list[str]:
 
 def _in_oid_tree(oid: str, base_oid: str) -> bool:
     return oid == base_oid or oid.startswith(f"{base_oid}.")
+
+
+def _oid_parts(oid: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(part) for part in oid.split("."))
+    except ValueError:
+        return ()
 
 
 def _index_from_oid(oid: str, base_oid: str) -> int | None:

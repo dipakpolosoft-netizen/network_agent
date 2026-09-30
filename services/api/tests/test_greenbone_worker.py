@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from uuid import uuid4
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -13,7 +14,9 @@ from forgesec_api.settings import Settings
 from forgesec_api.workers.greenbone_runtime import (
     GreenboneSettings,
     WorkerLeaseLost,
+    _findings,
     _target,
+    run_forever,
     run_greenbone,
 )
 from forgesec_api.workers.runtime_client import WorkerRuntimeError
@@ -208,6 +211,33 @@ def test_greenbone_cancel_revokes_active_lease(client: TestClient) -> None:
         == 409
     )
     assert client.post(f"/api/worker-jobs/{job['job_id']}/cancel").status_code == 409
+
+
+def test_greenbone_worker_failure_is_not_a_clean_report(client: TestClient) -> None:
+    agent, asset = web_asset(client)
+    site_id = client.get(f"/api/agents/{agent['agent_id']}").json()["site_id"]
+    worker = greenbone_worker(client, site_id)
+    headers = {"Authorization": f"Bearer {worker['credential']}"}
+    job = client.post(
+        "/api/worker-jobs/greenbone", json=greenbone_request(asset["asset_id"])
+    ).json()
+    claim = client.get("/worker/jobs/next", headers=headers).json()
+    failed = client.post(
+        f"/worker/jobs/{job['job_id']}/result",
+        headers=headers,
+        json={
+            "schema_version": "1.0",
+            "lease_id": claim["lease_id"],
+            "status": "failed",
+            "summary": "Greenbone did not verify the target host",
+            "evidence": {},
+        },
+    )
+    assert failed.status_code == 200
+    detail = client.get(f"/api/worker-jobs/{job['job_id']}").json()
+    assert detail["status"] == "failed"
+    assert detail["evidence"] is None
+    assert "did not verify" in detail["summary"]
 
 
 def test_greenbone_queue_is_admin_only_and_csrf_protected(settings: Settings) -> None:
@@ -430,6 +460,84 @@ def test_greenbone_adapter_stops_task_when_lease_is_lost() -> None:
     assert gmp.stopped
 
 
+def test_greenbone_rechecks_lease_before_start_task() -> None:
+    gmp = FakeGmp()
+
+    def lose_lease(progress, phase):
+        if phase == "Starting":
+            raise WorkerLeaseLost("Scope removed")
+
+    with pytest.raises(WorkerLeaseLost):
+        run_greenbone(
+            runtime_job(),
+            runtime_settings(),
+            on_tick=lose_lease,
+            gmp_factory=lambda settings: gmp,
+            sleep=lambda seconds: None,
+        )
+    assert gmp.created_tasks == 1
+    assert gmp.started is False
+
+
+@pytest.mark.parametrize("lease_available", [True, False])
+def test_greenbone_worker_renews_before_gmp_and_each_checkpoint(
+    monkeypatch: pytest.MonkeyPatch, lease_available: bool
+) -> None:
+    events: list[str] = []
+    job = runtime_job()
+
+    class Client:
+        def __init__(self):
+            self.claims = 0
+
+        def heartbeat(self):
+            events.append("heartbeat")
+
+        def claim(self):
+            self.claims += 1
+            if self.claims > 1:
+                raise KeyboardInterrupt
+            return job
+
+        def renew(self, claimed_job, *, progress=None, phase=None):
+            assert claimed_job is job
+            events.append(f"renew:{phase}")
+            if not lease_available:
+                raise WorkerRuntimeError("HTTP 409")
+
+        def finish(self, claimed_job, status, summary, evidence):
+            assert claimed_job is job
+            assert status == "completed"
+            events.append("finish")
+
+    def fake_scan(claimed_job, settings, *, on_tick):
+        assert claimed_job is job
+        events.append("gmp")
+        on_tick(None, "Preparing")
+        on_tick(None, "Starting")
+        on_tick(50, "Running")
+        return {"findings": []}
+
+    monkeypatch.setattr(
+        "forgesec_api.workers.greenbone_runtime.run_greenbone", fake_scan
+    )
+    with pytest.raises(KeyboardInterrupt):
+        run_forever(Client(), runtime_settings())
+    assert events == (
+        [
+            "heartbeat",
+            "renew:Preparing",
+            "gmp",
+            "renew:Preparing",
+            "renew:Starting",
+            "renew:Running",
+            "finish",
+        ]
+        if lease_available
+        else ["heartbeat", "renew:Preparing"]
+    )
+
+
 def test_greenbone_adapter_stops_task_on_keyboard_interrupt() -> None:
     gmp = FakeGmp()
 
@@ -481,3 +589,83 @@ def test_greenbone_report_rejects_foreign_host() -> None:
             sleep=lambda seconds: None,
         )
     assert gmp.stopped
+
+
+def test_greenbone_report_checks_entire_bounded_page_and_total() -> None:
+    response = ET.fromstring(
+        f'<get_report_response><report id="{REPORT_ID}">'
+        f'<report id="{REPORT_ID}"><scan_run_status>Done</scan_run_status>'
+        "<hosts><count>1</count></hosts><errors><count>0</count></errors>"
+        "<result_count><filtered>75</filtered></result_count><results />"
+        "</report></report></get_report_response>"
+    )
+    results = response.find("report/report/results")
+    for _ in range(51):
+        item = ET.SubElement(results, "result", id=str(uuid4()))
+        ET.SubElement(item, "host").text = "192.168.1.10"
+        ET.SubElement(item, "severity").text = "5.0"
+    results[-1].find("host").text = "192.168.1.99"
+    with pytest.raises(WorkerRuntimeError, match="out-of-scope"):
+        _findings(response, "192.168.1.10", REPORT_ID)
+
+    results[-1].find("host").text = "192.168.1.10"
+    findings, truncated = _findings(response, "192.168.1.10", REPORT_ID)
+    assert len(findings) == 50
+    assert truncated is True
+    results.remove(results[-1])
+    findings, truncated = _findings(response, "192.168.1.10", REPORT_ID)
+    assert len(findings) == 50
+    assert truncated is True
+
+    results.remove(results[-1])
+    with pytest.raises(WorkerRuntimeError, match="result page is incomplete"):
+        _findings(response, "192.168.1.10", REPORT_ID)
+
+    response.find("report/report/result_count/filtered").text = "50"
+    with pytest.raises(WorkerRuntimeError, match="result page is incomplete"):
+        _findings(response, "192.168.1.10", REPORT_ID)
+
+
+def test_empty_greenbone_report_requires_completed_host_coverage() -> None:
+    response = ET.fromstring(
+        f'<get_report_response><report id="{REPORT_ID}">'
+        f'<report id="{REPORT_ID}"><scan_run_status>Done</scan_run_status>'
+        "<hosts><count>0</count></hosts><errors><count>0</count></errors>"
+        "<result_count><filtered>0</filtered></result_count><results />"
+        "</report></report></get_report_response>"
+    )
+    with pytest.raises(WorkerRuntimeError, match="did not verify"):
+        _findings(response, "192.168.1.10", REPORT_ID)
+
+    response.find("report/report/hosts/count").text = "1"
+    assert _findings(response, "192.168.1.10", REPORT_ID) == ([], False)
+    response.find("report/report/result_count/filtered").text = "1"
+    with pytest.raises(WorkerRuntimeError, match="omitted expected"):
+        _findings(response, "192.168.1.10", REPORT_ID)
+    response.find("report/report/result_count/filtered").text = "0"
+    response.find("report/report/errors/count").text = "1"
+    with pytest.raises(WorkerRuntimeError, match="scan errors"):
+        _findings(response, "192.168.1.10", REPORT_ID)
+    response.find("report/report/errors").remove(
+        response.find("report/report/errors/count")
+    )
+    with pytest.raises(WorkerRuntimeError, match="coverage is unavailable"):
+        _findings(response, "192.168.1.10", REPORT_ID)
+
+
+def test_greenbone_start_failure_attempts_task_cleanup() -> None:
+    class UncertainStartGmp(FakeGmp):
+        def start_task(self, task_id):
+            self.started = True
+            raise OSError("GMP response was lost after starting")
+
+    gmp = UncertainStartGmp()
+    with pytest.raises(OSError):
+        run_greenbone(
+            runtime_job(),
+            runtime_settings(),
+            on_tick=lambda progress, phase: None,
+            gmp_factory=lambda settings: gmp,
+            sleep=lambda seconds: None,
+        )
+    assert gmp.stopped is True

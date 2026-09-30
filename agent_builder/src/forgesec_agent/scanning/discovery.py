@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import time
 from collections.abc import Callable
@@ -25,8 +26,8 @@ from forgesec_agent.scanning.nmap_runner import (
     ScanCancelled,
     ScanTimedOut,
 )
-from forgesec_agent.scanning.parser import parse_discovery_xml
-from forgesec_agent.scanning.policy import require_approved
+from forgesec_agent.scanning.parser import NmapParseError, parse_discovery_xml
+from forgesec_agent.scanning.policy import exclusions_for_scope, require_approved
 
 LOGGER = logging.getLogger(__name__)
 
@@ -96,6 +97,7 @@ class DiscoveryCommandHandler:
         completed_scopes: list[str] = []
         failed_scopes: list[str] = []
         devices_by_ip: dict[str, dict[str, Any]] = {}
+        follow_up_checks: list[dict[str, Any]] = []
         current_scope: str | None = None
         control_checked_at = 0.0
         cancellation_requested = False
@@ -130,14 +132,56 @@ class DiscoveryCommandHandler:
                 scope = self.scope_selector()
                 scan_scopes = (scope.network,)
             require_approved(payload.get("scope_policy"), list(scan_scopes))
+            scope_policy = payload["scope_policy"]
             mode = str(payload.get("mode") or "selected")
+            known_targets = payload.get("known_targets") or []
+            if not isinstance(known_targets, list) or len(known_targets) > 3:
+                raise ValueError("Choose up to three known IPv4 hosts")
+            if known_targets and mode != "selected":
+                raise ValueError("Known-host checks require one selected scope")
+            if len(set(known_targets)) != len(known_targets):
+                raise ValueError("Known-host checks must be distinct")
+            for target in known_targets:
+                address = ipaddress.IPv4Address(target)
+                if (
+                    address not in ipaddress.ip_network(scan_scopes[0])
+                    or target == scope.local_ip
+                ):
+                    raise ValueError(
+                        "Known host is outside selected scope or is the probe"
+                    )
+            require_approved(payload.get("scope_policy"), known_targets)
             result_network = (
                 str(payload.get("connected_network"))
                 if mode == "all"
                 else scan_scopes[0]
             )
             total_scopes = len(scan_scopes)
+            discovery_weight = 85 if known_targets else 100
             last_keepalive = time.monotonic()
+
+            def accept_segment_devices(xml_output: str, target_scope: str) -> int:
+                accepted_count = 0
+                target_network = ipaddress.ip_network(target_scope)
+                for device in parse_discovery_xml(
+                    xml_output,
+                    local_ip=scope.local_ip,
+                    observed_at=timestamp(),
+                ):
+                    if ipaddress.ip_address(device["ip"]) not in target_network:
+                        LOGGER.warning(
+                            "Discarded discovered host outside selected segment"
+                        )
+                        continue
+                    try:
+                        require_approved(scope_policy, [device["ip"]])
+                    except ValueError:
+                        LOGGER.warning("Discarded discovered host outside site policy")
+                        continue
+                    device["discovery_scope"] = target_scope
+                    devices_by_ip[device["ip"]] = device
+                    accepted_count += 1
+                return accepted_count
 
             for scope_index, target_scope in enumerate(scan_scopes, start=1):
                 current_scope = target_scope
@@ -161,7 +205,9 @@ class DiscoveryCommandHandler:
                         completed_scopes=completed_scopes,
                         failed_scopes=failed_scopes,
                         found_count=len(devices_by_ip),
-                        progress_percent=((scope_index - 1) / total_scopes) * 100,
+                        progress_percent=(
+                            (scope_index - 1) / total_scopes
+                        ) * discovery_weight,
                         address_count=_network_address_count(target_scope),
                         command=(
                             "nmap -sn --host-timeout 30s --stats-every 2s "
@@ -181,7 +227,7 @@ class DiscoveryCommandHandler:
                     segment_percent = update.progress_percent or 0
                     aggregate_percent = (
                         ((index - 1) + segment_percent / 100) / total_scopes
-                    ) * 100
+                    ) * discovery_weight
                     try:
                         self._event(
                             client,
@@ -216,19 +262,14 @@ class DiscoveryCommandHandler:
                         LOGGER.warning("Unable to report discovery progress: %s", exc)
 
                 try:
+                    exclusions = exclusions_for_scope(scope_policy, target_scope)
                     xml_output = self.nmap.discover(
                         target_scope,
+                        exclusions=exclusions,
                         cancel_requested=should_cancel,
                         progress_callback=progress,
                     )
-                    segment_devices = parse_discovery_xml(
-                        xml_output,
-                        local_ip=scope.local_ip,
-                        observed_at=timestamp(),
-                    )
-                    for device in segment_devices:
-                        device["discovery_scope"] = target_scope
-                        devices_by_ip[device["ip"]] = device
+                    accepted_count = accept_segment_devices(xml_output, target_scope)
                     completed_scopes.append(target_scope)
                     self._event(
                         client,
@@ -237,7 +278,7 @@ class DiscoveryCommandHandler:
                         status="running",
                         message=(
                             f"Segment {scope_index} of {total_scopes} completed "
-                            f"with {len(segment_devices)} active devices"
+                            f"with {accepted_count} active devices"
                         ),
                         details=self._progress_details(
                             result_network=result_network,
@@ -248,7 +289,9 @@ class DiscoveryCommandHandler:
                             completed_scopes=completed_scopes,
                             failed_scopes=failed_scopes,
                             found_count=len(devices_by_ip),
-                            progress_percent=(scope_index / total_scopes) * 100,
+                            progress_percent=(
+                                scope_index / total_scopes
+                            ) * discovery_weight,
                         ),
                     )
                 except ScanCancelled:
@@ -256,13 +299,24 @@ class DiscoveryCommandHandler:
                 except NmapUnavailable:
                     raise
                 except (ScanTimedOut, NmapExecutionError) as exc:
+                    partial_count = 0
+                    if isinstance(exc, ScanTimedOut) and exc.partial_xml:
+                        partial_count = accept_segment_devices(
+                            exc.partial_xml, target_scope
+                        )
                     failed_scopes.append(target_scope)
                     self._event(
                         client,
                         identity,
                         command_id,
                         status="running",
-                        message=f"Segment {target_scope} failed: {exc}",
+                        message=(
+                            f"Segment {target_scope} failed: {exc}"
+                            + (
+                                f"; {partial_count} partial host(s) retained"
+                                if partial_count else ""
+                            )
+                        ),
                         details=self._progress_details(
                             result_network=result_network,
                             current_scope=target_scope,
@@ -272,8 +326,103 @@ class DiscoveryCommandHandler:
                             completed_scopes=completed_scopes,
                             failed_scopes=failed_scopes,
                             found_count=len(devices_by_ip),
-                            progress_percent=(scope_index / total_scopes) * 100,
+                            progress_percent=(
+                                scope_index / total_scopes
+                            ) * discovery_weight,
                         ),
+                    )
+
+            if completed_scopes and known_targets:
+                for index, target in enumerate(known_targets, start=1):
+                    if should_cancel():
+                        raise ScanCancelled("Discovery stopped by the user")
+                    existing = devices_by_ip.get(target)
+                    if existing:
+                        follow_up_checks.append({
+                            "ip": target,
+                            "status": "already_discovered",
+                            "method": "initial_discovery",
+                            "checked_at": existing["last_seen"],
+                            "reason": existing["discovery_reason"],
+                        })
+                        continue
+                    self._event(
+                        client, identity, command_id,
+                        status="running",
+                        message=f"Checking known host {index} of {len(known_targets)}",
+                        details={
+                            "stage": "verifying_known_hosts",
+                            "network": result_network,
+                            "found_count": len(devices_by_ip),
+                            "progress_percent": 85 + (
+                                (index - 1) / len(known_targets)
+                            ) * 15,
+                        },
+                    )
+
+                    def keepalive() -> None:
+                        nonlocal last_keepalive
+                        if self.heartbeat is not None and (
+                            time.monotonic() - last_keepalive
+                            >= identity.heartbeat_interval_seconds
+                        ):
+                            self._keepalive(identity, command_id, client)
+                            last_keepalive = time.monotonic()
+
+                    try:
+                        xml_output = self.nmap.verify_known_host(
+                            target,
+                            cancel_requested=should_cancel,
+                            activity_callback=keepalive,
+                        )
+                        matched = next(
+                            (
+                                device for device in parse_discovery_xml(
+                                    xml_output,
+                                    local_ip=scope.local_ip,
+                                    observed_at=timestamp(),
+                                )
+                                if device["ip"] == target
+                            ),
+                            None,
+                        )
+                        if matched:
+                            reason = matched["discovery_reason"]
+                            matched["discovery_reason"] = f"targeted-{reason}"
+                            matched["discovery_scope"] = scan_scopes[0]
+                            devices_by_ip[target] = matched
+                            status = "responsive"
+                        else:
+                            reason = "no-response"
+                            status = "no_response"
+                        error = None
+                    except ScanCancelled:
+                        raise
+                    except (
+                        NmapUnavailable,
+                        ScanTimedOut,
+                        NmapExecutionError,
+                        NmapParseError,
+                    ) as exc:
+                        status, reason, error = "error", None, str(exc)[:512]
+                    follow_up_checks.append({
+                        "ip": target,
+                        "status": status,
+                        "method": "targeted_tcp_icmp",
+                        "checked_at": timestamp(),
+                        "reason": reason,
+                        "error": error,
+                    })
+                    self._event(
+                        client, identity, command_id,
+                        status="running",
+                        message=f"Known host {target}: {status.replace('_', ' ')}",
+                        details={
+                            "stage": "verifying_known_hosts",
+                            "network": result_network,
+                            "found_count": len(devices_by_ip),
+                            "progress_percent": 85 + (index / len(known_targets)) * 15,
+                        },
                     )
 
             self._event(
@@ -294,18 +443,22 @@ class DiscoveryCommandHandler:
             )
             completed_at = timestamp()
             devices = self.enricher.enrich(_sorted_devices(devices_by_ip))
+            follow_up_failures = sum(
+                check["status"] == "error" for check in follow_up_checks
+            )
             result_status = (
                 "completed"
-                if not failed_scopes
+                if not failed_scopes and not follow_up_failures
                 else "partial"
-                if completed_scopes
+                if completed_scopes or devices_by_ip
                 else "failed"
             )
-            result_error = (
-                f"{len(failed_scopes)} of {len(scan_scopes)} segments failed"
-                if failed_scopes
-                else None
-            )
+            failures = []
+            if failed_scopes:
+                failures.append(f"{len(failed_scopes)} segment(s) failed")
+            if follow_up_failures:
+                failures.append(f"{follow_up_failures} known-host check(s) failed")
+            result_error = "; ".join(failures) or None
             client.upload_discovery(
                 discovery_id,
                 {
@@ -323,6 +476,7 @@ class DiscoveryCommandHandler:
                     "requested_scopes": list(scan_scopes),
                     "completed_scopes": completed_scopes,
                     "failed_scopes": failed_scopes,
+                    "follow_up_checks": follow_up_checks,
                 },
                 credential=identity.credential,
             )
@@ -332,7 +486,7 @@ class DiscoveryCommandHandler:
                 command_id,
                 status="failed" if result_status == "failed" else "completed",
                 message=(
-                    f"Discovery {result_status} with {len(devices)} active devices"
+                    f"Discovery {result_status} with {len(devices)} observed devices"
                 ),
                 details={
                     "stage": result_status,
@@ -349,11 +503,22 @@ class DiscoveryCommandHandler:
         except ScanCancelled as exc:
             completed_at = timestamp()
             if scope is not None and current_scope and exc.partial_xml:
+                selected_network = ipaddress.ip_network(current_scope)
                 for device in parse_discovery_xml(
                     exc.partial_xml,
                     local_ip=scope.local_ip,
                     observed_at=completed_at,
                 ):
+                    if ipaddress.ip_address(device["ip"]) not in selected_network:
+                        LOGGER.warning(
+                            "Discarded partial host outside selected segment"
+                        )
+                        continue
+                    try:
+                        require_approved(scope_policy, [device["ip"]])
+                    except ValueError:
+                        LOGGER.warning("Discarded partial host outside site policy")
+                        continue
                     device["discovery_scope"] = current_scope
                     devices_by_ip[device["ip"]] = device
             devices = self.enricher.enrich(_sorted_devices(devices_by_ip))
@@ -375,6 +540,7 @@ class DiscoveryCommandHandler:
                         "requested_scopes": list(scan_scopes),
                         "completed_scopes": completed_scopes,
                         "failed_scopes": failed_scopes,
+                        "follow_up_checks": follow_up_checks,
                     },
                     credential=identity.credential,
                 )
@@ -442,7 +608,7 @@ class DiscoveryCommandHandler:
             )
         except Exception as exc:
             LOGGER.warning("Unable to read discovery control: %s", exc)
-            return False
+            return True
         return bool(control.get("cancel_requested"))
 
     @staticmethod

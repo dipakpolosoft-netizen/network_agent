@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from uuid import uuid4
 
@@ -26,7 +27,28 @@ def normalize_mac(value: str | None) -> str | None:
     digits = value.replace(":", "").replace("-", "").lower()
     if len(digits) != 12:
         return None
+    if digits == "0" * 12 or int(digits[:2], 16) & 1:
+        return None
     return ":".join(digits[index : index + 2] for index in range(0, 12, 2))
+
+
+def merge_role(asset: dict, device_type: str | None, confidence: float | None) -> None:
+    if not device_type or device_type == "unknown":
+        return
+    existing_type = asset.get("device_type")
+    existing_confidence = asset.get("classification_confidence") or 0.0
+    incoming_confidence = confidence or 0.0
+    if (
+        existing_type not in {None, "unknown", device_type}
+        and incoming_confidence <= existing_confidence
+    ):
+        return
+    asset["device_type"] = device_type
+    asset["classification_confidence"] = (
+        max(existing_confidence, incoming_confidence)
+        if existing_type == device_type
+        else confidence
+    )
 
 
 class AssetService:
@@ -40,10 +62,6 @@ class AssetService:
     @staticmethod
     def _observation_key(kind: str, source_id: str, device_id: str) -> str:
         return hashlib.sha256(f"{kind}|{source_id}|{device_id}".encode()).hexdigest()
-
-    def _site_id(self, agent_id: str) -> str | None:
-        agent = self.store.read("agents", agent_id)
-        return agent.get("site_id") if agent else None
 
     def _resolve(self, site_id: str, ip: str, mac: str | None) -> dict | None:
         if mac:
@@ -109,11 +127,21 @@ class AssetService:
                     "last_discovery_id": None,
                     "last_scan_id": None,
                     "last_scan_status": None,
+                    "port_snapshot_scan_id": None,
+                    "port_snapshot_at": None,
+                    "port_snapshot_ip": None,
                     "observation_count": 0,
                     "scan_count": 0,
                     "created_at": now,
                     "updated_at": now,
                 }
+            elif (
+                "port_snapshot_at" not in asset
+                and asset.get("last_scan_status") == "completed"
+            ):
+                asset["port_snapshot_scan_id"] = asset.get("last_scan_id")
+                asset["port_snapshot_at"] = asset.get("last_scan_at")
+                asset["port_snapshot_ip"] = asset.get("last_ip")
             previous_ip = asset["last_ip"]
             newer = parse_timestamp(observed_at) >= parse_timestamp(asset["last_seen"])
             if positive:
@@ -126,12 +154,11 @@ class AssetService:
                         asset["hostname"] = device["hostname"]
                     if device.get("vendor"):
                         asset["vendor"] = device["vendor"]
-                    if device.get("device_type"):
-                        asset["device_type"] = device["device_type"]
-                    if device.get("classification_confidence") is not None:
-                        asset["classification_confidence"] = device[
-                            "classification_confidence"
-                        ]
+                    merge_role(
+                        asset,
+                        device.get("device_type"),
+                        device.get("classification_confidence"),
+                    )
                 if ip not in asset["ip_history"]:
                     asset["ip_history"] = [*asset["ip_history"], ip][-IP_HISTORY_LIMIT:]
             if mac and not asset["mac"]:
@@ -150,53 +177,51 @@ class AssetService:
                     asset["last_scan_at"] = observed_at
                     asset["last_scan_id"] = source_id
                     asset["last_scan_status"] = result["status"]
-                    if positive:
-                        ports = [
-                            port
-                            for port in result.get("ports", [])
-                            if port["state"] == "open"
-                        ]
-                        asset["open_port_count"] = len(ports)
-                        sampled_ports = ports[:PORT_SAMPLE_LIMIT]
-                        ssh_port = next(
-                            (
-                                port
-                                for port in ports
-                                if port["protocol"] == "tcp" and port["port"] == 22
-                            ),
-                            None,
+                if result["status"] == "completed" and (
+                    not asset.get("port_snapshot_at")
+                    or parse_timestamp(observed_at)
+                    >= parse_timestamp(asset["port_snapshot_at"])
+                ):
+                    ports = [
+                        port for port in result.get("ports", [])
+                        if port["state"] == "open"
+                    ]
+                    asset["open_port_count"] = len(ports)
+                    sampled_ports = ports[:PORT_SAMPLE_LIMIT]
+                    ssh_port = next(
+                        (
+                            port for port in ports
+                            if port["protocol"] == "tcp" and port["port"] == 22
+                        ),
+                        None,
+                    )
+                    if ssh_port is not None and ssh_port not in sampled_ports:
+                        sampled_ports[-1] = ssh_port
+                    asset["ports"] = [
+                        {
+                            key: port.get(key)
+                            for key in (
+                                "protocol", "port", "service", "product", "version"
+                            )
+                        }
+                        for port in sampled_ports
+                    ]
+                    asset["port_snapshot_scan_id"] = source_id
+                    asset["port_snapshot_at"] = observed_at
+                    asset["port_snapshot_ip"] = ip
+                    matches = result.get("os_matches") or []
+                    if matches:
+                        best = max(matches, key=lambda item: item["accuracy"])
+                        asset["os_name"] = best["name"]
+                        asset["os_accuracy"] = best["accuracy"]
+                    if newer and result.get("hostname"):
+                        asset["hostname"] = result["hostname"]
+                    if newer:
+                        merge_role(
+                            asset,
+                            result.get("device_type"),
+                            result.get("classification_confidence"),
                         )
-                        if ssh_port is not None and ssh_port not in sampled_ports:
-                            sampled_ports[-1] = ssh_port
-                        asset["ports"] = [
-                            {
-                                key: port.get(key)
-                                for key in (
-                                    "protocol",
-                                    "port",
-                                    "service",
-                                    "product",
-                                    "version",
-                                )
-                            }
-                            for port in sampled_ports
-                        ]
-                        matches = result.get("os_matches") or []
-                        if matches:
-                            best = max(matches, key=lambda item: item["accuracy"])
-                            asset["os_name"] = best["name"]
-                            asset["os_accuracy"] = best["accuracy"]
-                        if newer and result.get("hostname"):
-                            asset["hostname"] = result["hostname"]
-                        if newer and result.get("device_type"):
-                            asset["device_type"] = result["device_type"]
-                        if (
-                            newer
-                            and result.get("classification_confidence") is not None
-                        ):
-                            asset["classification_confidence"] = result[
-                                "classification_confidence"
-                            ]
             asset["observation_count"] += 1
             asset["updated_at"] = now
             self.store.write("assets", asset["asset_id"], asset)
@@ -237,7 +262,7 @@ class AssetService:
                 "status": result["status"] if result else device.get("status", "up"),
                 "open_port_count": (
                     sum(port["state"] == "open" for port in result.get("ports", []))
-                    if result
+                    if result and result["status"] == "completed"
                     else None
                 ),
                 "vendor": device.get("vendor") if result is None else None,
@@ -286,7 +311,7 @@ class AssetService:
             return asset["asset_id"]
 
     def observe_discovery(self, discovery: dict) -> None:
-        site_id = self._site_id(discovery["agent_id"])
+        site_id = discovery.get("site_id")
         if not site_id:
             return
         observed_at = discovery.get("completed_at") or discovery["created_at"]
@@ -303,10 +328,16 @@ class AssetService:
             )
 
     def observe_scan(self, scan: dict, result: dict) -> None:
-        site_id = self._site_id(scan["agent_id"])
+        site_id = scan.get("site_id")
         if not site_id:
             return
         discovery = self.store.read("discoveries", scan["discovery_id"])
+        if (
+            not discovery
+            or discovery.get("site_id") != site_id
+            or discovery.get("agent_id") != scan["agent_id"]
+        ):
+            return
         device = next(
             (
                 item
@@ -366,10 +397,73 @@ class AssetService:
         return asset
 
     def observations(self, asset_id: str, *, limit: int, offset: int) -> list[dict]:
-        self.get(asset_id)
+        asset = self.get(asset_id)
         items = self.store.list_by_field("asset-observations", "asset_id", asset_id)
-        items.sort(key=lambda item: item["observed_at"], reverse=True)
-        return items[offset : offset + limit]
+        items.sort(key=lambda item: (item["observed_at"], item["observation_id"]))
+        previous: dict[tuple[str, str, str, str], tuple[str, dict]] = {}
+        enriched: list[dict] = []
+        for item in items:
+            entry = dict(item)
+            if item["source_type"] != "scan":
+                enriched.append(entry)
+                continue
+            scan = self.store.read("scans", item["source_id"])
+            if (
+                not scan
+                or scan.get("site_id") != asset["site_id"]
+                or scan.get("agent_id") != item["agent_id"]
+            ):
+                enriched.append(entry)
+                continue
+            entry["scan_profile"] = scan.get("profile")
+            result = next(
+                (
+                    result for result in scan.get("results", [])
+                    if result["device_id"] == item["source_device_id"]
+                    and result["ip"] == item["ip"]
+                ),
+                None,
+            )
+            if not result or result.get("status") != "completed":
+                enriched.append(entry)
+                continue
+            plan = scan.get("profile_plan")
+            if not isinstance(plan, dict) or not plan:
+                enriched.append(entry)
+                continue
+            ports = {
+                (port["protocol"], port["port"]): {
+                    "protocol": port["protocol"],
+                    "port": port["port"],
+                    "service": port.get("service"),
+                }
+                for port in result.get("ports", [])
+                if port.get("state") == "open"
+            }
+            signature = (
+                item["agent_id"],
+                item["ip"],
+                scan["profile"],
+                json.dumps(plan, sort_keys=True),
+            )
+            baseline = previous.get(signature)
+            if baseline:
+                baseline_id, old_ports = baseline
+                opened = sorted(ports.keys() - old_ports.keys())
+                no_longer = sorted(old_ports.keys() - ports.keys())
+                entry["port_delta"] = {
+                    "baseline_scan_id": baseline_id,
+                    "opened_count": len(opened),
+                    "no_longer_confirmed_count": len(no_longer),
+                    "opened_ports": [ports[key] for key in opened[:32]],
+                    "no_longer_confirmed_ports": [
+                        old_ports[key] for key in no_longer[:32]
+                    ],
+                }
+            previous[signature] = (scan["scan_id"], ports)
+            enriched.append(entry)
+        enriched.reverse()
+        return enriched[offset : offset + limit]
 
     def update(
         self, asset_id: str, payload: AssetPatch, *, actor_id: str | None

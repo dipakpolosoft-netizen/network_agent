@@ -50,6 +50,11 @@ def _summarize(cpe: str, affected_services: list[dict], lookup: dict) -> dict:
         "affected_service_count": len(affected_services),
         "total": lookup.get("total", 0),
         "returned": lookup.get("returned", len(vulnerabilities)),
+        "truncated": lookup.get(
+            "truncated", lookup.get("total", 0) > len(vulnerabilities)
+        ),
+        "retrieved_at": lookup.get("retrieved_at"),
+        "cached": bool(lookup.get("cached")),
         "severity_counts": {severity: counts[severity] for severity in SEVERITIES},
         "highest_severity": (
             max(present, key=SEVERITY_RANK.__getitem__) if present else None
@@ -78,8 +83,21 @@ class AssessmentService:
         assessment = self.store.read("vulnerability-assessments", scan_id)
         if assessment is None:
             raise AssessmentNotFound
+        items = [
+            {
+                **item,
+                "truncated": item.get(
+                    "truncated", item.get("total", 0) > item.get("returned", 0)
+                ),
+            }
+            for item in assessment["items"]
+        ]
         return {
             **assessment,
+            "items": items,
+            "partial_cpes": assessment.get(
+                "partial_cpes", sum(item["truncated"] for item in items)
+            ),
             "evidence_current": (
                 assessment["evidence_fingerprint"] == _fingerprint(contexts)
             ),
@@ -109,6 +127,9 @@ class AssessmentService:
                     "affected_service_count": len(affected_services),
                     "total": 0,
                     "returned": 0,
+                    "truncated": False,
+                    "retrieved_at": None,
+                    "cached": False,
                     "severity_counts": {severity: 0 for severity in SEVERITIES},
                     "highest_severity": None,
                     "known_exploited": 0,
@@ -147,6 +168,7 @@ class AssessmentService:
             "evidence_fingerprint": fingerprint,
             "evidence_current": True,
             "cached_lookups": cached_lookups,
+            "partial_cpes": sum(item["truncated"] for item in items),
         }
         with self.store.locked():
             if _fingerprint(self.scans.observed_cpe_contexts(scan_id)) != fingerprint:

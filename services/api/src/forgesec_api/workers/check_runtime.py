@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, build_opener
 
 from forgesec_api.workers.greenbone_runtime import GreenboneSettings
-from forgesec_api.workers.nuclei_runtime import TEMPLATE_PATH
+from forgesec_api.workers.nuclei_runtime import TEMPLATE_PATH, verify_binary
 from forgesec_api.workers.runtime_client import (
     WorkerClient,
     WorkerRuntimeError,
@@ -49,6 +49,11 @@ def local_issues(kind: str) -> list[str]:
         binary = os.environ.get("FORGESEC_NUCLEI_BINARY", "")
         if not binary or not Path(binary).is_file():
             issues.append("FORGESEC_NUCLEI_BINARY must point to an installed binary")
+        else:
+            try:
+                verify_binary(Path(binary))
+            except WorkerRuntimeError as exc:
+                issues.append(str(exc))
         if not TEMPLATE_PATH.is_file():
             issues.append("The bundled ForgeSec Nuclei template is missing")
     elif kind == "greenbone":

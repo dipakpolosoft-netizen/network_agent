@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from test_scan_flow import completed_discovery
@@ -70,6 +71,11 @@ def test_discovery_and_scan_build_durable_asset_history(client: TestClient) -> N
     path = f"/agent/scans/{scan['scan_id']}/hosts/selected-device-0001/result"
     assert client.post(path, headers=headers, json=payload).status_code == 200
     assert client.post(path, headers=headers, json=payload).status_code == 200
+    conflicting = {
+        **payload,
+        "ports": [{"protocol": "tcp", "port": 23, "state": "open"}],
+    }
+    assert client.post(path, headers=headers, json=conflicting).status_code == 422
     updated = client.get(f"/api/assets/{first['asset_id']}").json()
     assert updated["display_name"] == "Core switch"
     assert updated["owner"] == "Network team"
@@ -87,6 +93,143 @@ def test_discovery_and_scan_build_durable_asset_history(client: TestClient) -> N
     assert searched["total"] == 1
     assert client.get("/api/assets", params={"limit": 1}).json()["total"] == 2
     assert len(client.get("/api/assets", params={"limit": 1}).json()["items"]) == 1
+
+    assert client.post(
+        f"/agent/scans/{scan['scan_id']}/progress",
+        headers=headers,
+        json={
+            "schema_version": "1.0",
+            "message_type": "scan.progress",
+            "scan_id": scan["scan_id"],
+            "agent_id": agent["agent_id"],
+            "status": "completed",
+            "stage": "completed",
+            "total": 1,
+            "queued": 0,
+            "running": 0,
+            "completed": 1,
+            "failed": 0,
+            "cancelled": 0,
+            "updated_at": now,
+        },
+    ).status_code == 200
+    partial = client.post(
+        f"/api/discoveries/{discovery['discovery_id']}/scan",
+        json={
+            "device_ids": ["selected-device-0001"],
+            "profile": "standard",
+            "authorization_confirmed": True,
+        },
+    ).json()
+    partial_payload = {
+        **payload,
+        "scan_id": partial["scan_id"],
+        "status": "partial",
+        "ports": [{"protocol": "tcp", "port": 23, "state": "open"}],
+    }
+    assert client.post(
+        f"/agent/scans/{partial['scan_id']}/hosts/selected-device-0001/result",
+        headers=headers,
+        json=partial_payload,
+    ).status_code == 200
+    retained = client.get(f"/api/assets/{first['asset_id']}").json()
+    assert retained["last_scan_id"] == partial["scan_id"]
+    assert retained["last_scan_status"] == "partial"
+    assert retained["port_snapshot_scan_id"] == scan["scan_id"]
+    assert retained["open_port_count"] == 1
+    assert retained["ports"][0]["port"] == 22
+    history = client.get(f"/api/assets/{first['asset_id']}/observations").json()
+    partial_entry = next(
+        item for item in history if item["source_id"] == partial["scan_id"]
+    )
+    assert partial_entry["open_port_count"] is None
+    assert partial_entry["port_delta"] is None
+
+
+def test_probe_discovery_record_does_not_create_an_asset(client: TestClient) -> None:
+    agent, discovery = completed_discovery(client, device_count=1)
+    site_id = client.get(f"/api/agents/{agent['agent_id']}").json()["site_id"]
+    saved = client.app.state.store.read("discoveries", discovery["discovery_id"])
+    probe = {
+        **saved["devices"][0],
+        "device_id": "probe-device",
+        "ip": "192.168.1.25",
+        "is_agent": True,
+    }
+    client.app.state.asset_service.observe_discovery(
+        {
+            "discovery_id": str(uuid4()),
+            "agent_id": agent["agent_id"],
+            "created_at": datetime.now(UTC).isoformat(),
+            "devices": [probe],
+        }
+    )
+    listed = client.get("/api/assets", params={"site_id": site_id}).json()
+    assert listed["total"] == 1
+    assert all(item["last_ip"] != "192.168.1.25" for item in listed["items"])
+
+
+def test_probe_reassignment_rejects_late_scan_evidence_without_retagging(
+    client: TestClient,
+) -> None:
+    agent, discovery = completed_discovery(client, device_count=1)
+    store = client.app.state.store
+    original_site = store.read("discoveries", discovery["discovery_id"])["site_id"]
+    scan_response = client.post(
+        f"/api/discoveries/{discovery['discovery_id']}/scan",
+        json={
+            "device_ids": ["selected-device-0001"],
+            "profile": "standard",
+            "authorization_confirmed": True,
+        },
+    )
+    assert scan_response.status_code == 202
+    scan_id = scan_response.json()["scan_id"]
+    assert store.read("scans", scan_id)["site_id"] == original_site
+
+    new_site = client.post("/api/sites", json={"name": "New probe site"}).json()
+    agent_record = store.read("agents", agent["agent_id"])
+    agent_record["site_id"] = new_site["site_id"]
+    store.write("agents", agent["agent_id"], agent_record)
+    rejected = client.post(
+        f"/api/discoveries/{discovery['discovery_id']}/scan",
+        json={
+            "device_ids": ["selected-device-0001"],
+            "profile": "standard",
+            "authorization_confirmed": True,
+        },
+    )
+    assert rejected.status_code == 422
+    assert "Discovery site differs" in rejected.json()["detail"]
+
+    now = datetime.now(UTC).isoformat()
+    result = client.post(
+        f"/agent/scans/{scan_id}/hosts/selected-device-0001/result",
+        headers={"Authorization": f"Bearer {agent['agent_credential']}"},
+        json={
+            "schema_version": "1.0",
+            "message_type": "host_scan.result",
+            "scan_id": scan_id,
+            "agent_id": agent["agent_id"],
+            "device_id": "selected-device-0001",
+            "ip": "192.168.1.10",
+            "status": "completed",
+            "started_at": now,
+            "completed_at": now,
+            "ports": [],
+            "os_matches": [],
+            "exposure_flags": [],
+        },
+    )
+    assert result.status_code == 422
+    assert store.read("scans", scan_id)["site_id"] == original_site
+    assert store.read("scans", scan_id)["results"] == []
+    assert client.get("/api/assets", params={"site_id": original_site}).json()[
+        "total"
+    ] == 1
+    assert client.get("/api/assets", params={"site_id": new_site["site_id"]}).json()[
+        "total"
+    ] == 0
 
 
 def test_asset_port_sample_keeps_observed_ssh_for_inventory(
@@ -168,6 +311,7 @@ def test_mac_identity_is_site_scoped_and_ip_reuse_does_not_overwrite(
     )
     remote = dict(record)
     remote["agent_id"] = other_agent_id
+    remote["site_id"] = other_site["site_id"]
     remote["discovery_id"] = "00000000-0000-0000-0000-000000000444"
     service.observe_discovery(remote)
     assert (

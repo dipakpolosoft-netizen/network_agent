@@ -112,6 +112,7 @@ DiagnosticKind = Literal[
 class AgentDiagnosticRequest(StrictModel):
     target_ip: str
     diagnostic_type: DiagnosticKind
+    full_tcp_confirmed: bool = False
 
     @field_validator("target_ip")
     @classmethod

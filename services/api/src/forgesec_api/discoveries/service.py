@@ -78,6 +78,7 @@ class DiscoveryService:
         requested_scope: str | None = None,
         mode: str = "selected",
         authorization_confirmed: bool = False,
+        known_targets: list[str] | None = None,
     ) -> dict:
         try:
             agent = self.agents.get_public(agent_id)
@@ -96,6 +97,32 @@ class DiscoveryService:
             raise InvalidDiscoveryScope(
                 "Approve every selected CIDR in the probe's site before discovery"
             )
+        targets = known_targets or []
+        if targets and mode != "selected":
+            raise InvalidDiscoveryScope("Known-host checks require one selected scope")
+        if len(targets) > 3 or len(set(targets)) != len(targets):
+            raise InvalidDiscoveryScope("Choose up to three distinct known IPv4 hosts")
+        selected_network = ipaddress.ip_network(plan["scopes"][0]) if targets else None
+        for target in targets:
+            try:
+                address = ipaddress.IPv4Address(target)
+            except ipaddress.AddressValueError as exc:
+                raise InvalidDiscoveryScope(
+                    "Known targets must be IPv4 addresses"
+                ) from exc
+            if (
+                address not in selected_network
+                or address in {
+                    selected_network.network_address,
+                    selected_network.broadcast_address,
+                }
+                or str(address) == agent.get("local_ip")
+                or not self.sites.approved(agent.get("site_id"), target)
+            ):
+                raise InvalidDiscoveryScope(
+                    "Known target must be inside the selected, approved scope "
+                    "and not be the probe"
+                )
         with self.store.locked():
             for existing in self.list(agent_id):
                 if existing["status"] in ACTIVE_STATUSES:
@@ -114,6 +141,7 @@ class DiscoveryService:
                     "mode": mode,
                     "authorization_confirmed": authorization_confirmed,
                     "scope_policy": self.sites.policy(agent.get("site_id")),
+                    "known_targets": targets,
                 },
             )
             now = isoformat(utc_now())
@@ -121,6 +149,7 @@ class DiscoveryService:
                 "discovery_id": discovery_id,
                 "command_id": command["command_id"],
                 "agent_id": agent_id,
+                "site_id": agent["site_id"],
                 "status": "queued",
                 "stage": "queued",
                 "network": plan["network"],
@@ -133,6 +162,8 @@ class DiscoveryService:
                 "current_scope": None,
                 "total_scopes": len(plan["scopes"]),
                 "public_scope_authorized": plan["public_scope_authorized"],
+                "known_targets": targets,
+                "follow_up_checks": [],
                 "device_count": 0,
                 "found_count": 0,
                 "progress_percent": None,
@@ -188,6 +219,17 @@ class DiscoveryService:
                 str(ipaddress.ip_network(item, strict=True))
                 for item in record.get("requested_scopes", [str(network)])
             }
+            agent = self.store.read("agents", authenticated_agent_id)
+            if (
+                not agent
+                or not record.get("site_id")
+                or record["site_id"] != agent.get("site_id")
+                or not all(
+                    self.sites.approved(record["site_id"], scope)
+                    for scope in requested_scopes
+                )
+            ):
+                raise InvalidDiscoveryResult("Discovery scope is no longer approved")
             if (
                 result.requested_scopes
                 and set(result.requested_scopes) != requested_scopes
@@ -223,6 +265,7 @@ class DiscoveryService:
                     "Completed discovery must account for every requested scope"
                 )
             seen_ips: set[str] = set()
+            probe_ip = agent.get("local_ip") if agent else None
             for device in result.devices:
                 try:
                     address = ipaddress.ip_address(device.ip)
@@ -231,6 +274,10 @@ class DiscoveryService:
                 if address not in network:
                     raise InvalidDiscoveryResult(
                         f"Discovered IP {address} is outside {network}"
+                    )
+                if not self.sites.approved(record["site_id"], str(address)):
+                    raise InvalidDiscoveryResult(
+                        "Discovered IP is outside the current site approval"
                     )
                 if device.discovery_scope:
                     try:
@@ -255,10 +302,48 @@ class DiscoveryService:
                 if str(address) in seen_ips:
                     raise InvalidDiscoveryResult(f"Duplicate discovered IP {address}")
                 seen_ips.add(str(address))
+            follow_up_ips: set[str] = set()
+            for check in result.follow_up_checks:
+                if check.ip not in record.get("known_targets", []):
+                    raise InvalidDiscoveryResult("Unrequested known-host check")
+                if check.ip in follow_up_ips:
+                    raise InvalidDiscoveryResult("Duplicate known-host check")
+                follow_up_ips.add(check.ip)
+                if check.status in {"already_discovered", "responsive"}:
+                    if check.ip not in seen_ips:
+                        raise InvalidDiscoveryResult(
+                            "Responsive known host is missing from devices"
+                        )
+                elif check.ip in seen_ips:
+                    raise InvalidDiscoveryResult(
+                        "No-response known host is present in devices"
+                    )
+                if (check.status == "already_discovered") != (
+                    check.method == "initial_discovery"
+                ):
+                    raise InvalidDiscoveryResult(
+                        "Known-host check method does not match status"
+                    )
+            missing_checks = set(record.get("known_targets", [])) - follow_up_ips
+            failed_checks = any(
+                check.status == "error" for check in result.follow_up_checks
+            )
+            result_status = (
+                "partial"
+                if result.status == "completed" and (missing_checks or failed_checks)
+                else result.status
+            )
+            result_error = result.error
+            if missing_checks:
+                result_error = (
+                    f"{len(missing_checks)} known-host check(s) were not reported"
+                )
+            elif failed_checks and not result_error:
+                result_error = "A known-host check failed"
             record.update(
                 {
-                    "status": result.status,
-                    "stage": result.status,
+                    "status": result_status,
+                    "stage": result_status,
                     "network": str(network),
                     "interface_name": result.interface_name,
                     "completed_scopes": completed_scopes,
@@ -267,27 +352,35 @@ class DiscoveryService:
                     "device_count": len(result.devices),
                     "found_count": len(result.devices),
                     "progress_percent": (
-                        100.0 if result.status == "completed" else None
+                        100.0 if result_status == "completed" else None
                     ),
                     "started_at": isoformat(result.started_at),
                     "completed_at": (
                         isoformat(result.completed_at) if result.completed_at else None
                     ),
                     "devices": [
-                        device.model_dump(mode="json") for device in result.devices
+                        {
+                            **device.model_dump(mode="json"),
+                            "is_agent": device.is_agent or device.ip == probe_ip,
+                        }
+                        for device in result.devices
                     ],
-                    "error": result.error,
+                    "follow_up_checks": [
+                        check.model_dump(mode="json")
+                        for check in result.follow_up_checks
+                    ],
+                    "error": result_error,
                 }
             )
             self._append_event(
                 record,
-                status=result.status,
-                stage=result.status,
+                status=result_status,
+                stage=result_status,
                 message=(
-                    f"Discovery completed with {len(result.devices)} active devices"
-                    if result.status == "completed"
-                    else result.error
-                    or f"Discovery finished with status {result.status}"
+                    f"Discovery completed with {len(result.devices)} observed devices"
+                    if result_status == "completed"
+                    else result_error
+                    or f"Discovery finished with status {result_status}"
                 ),
                 occurred_at=(
                     isoformat(result.completed_at)
@@ -301,14 +394,14 @@ class DiscoveryService:
             self.assets.observe_discovery(record)
             record_activity(
                 self.store,
-                event_type=f"discovery.{result.status}",
-                message=f"Discovery found {len(result.devices)} active devices",
+                event_type=f"discovery.{result_status}",
+                message=f"Discovery found {len(result.devices)} observed devices",
                 actor_type="agent",
                 actor_id=authenticated_agent_id,
                 resource_type="discovery",
                 resource_id=discovery_id,
                 details={"network": str(network), "device_count": len(result.devices)},
-                severity="error" if result.status == "failed" else "info",
+                severity="error" if result_status == "failed" else "info",
             )
             return record
 
@@ -428,23 +521,40 @@ class DiscoveryService:
         record = self.get(discovery_id)
         if record["agent_id"] != agent_id:
             raise DiscoveryOwnershipError
+        agent = self.store.read("agents", agent_id)
+        site_id = record.get("site_id")
+        scope_allowed = bool(
+            agent
+            and site_id
+            and site_id == agent.get("site_id")
+            and record.get("requested_scopes")
+            and all(
+                self.sites.approved(site_id, scope)
+                for scope in record.get("requested_scopes", [])
+            )
+            and all(
+                self.sites.approved(site_id, target)
+                for target in record.get("known_targets", [])
+            )
+        )
         return {
             "discovery_id": discovery_id,
-            "cancel_requested": record["cancel_requested"],
+            "cancel_requested": record["cancel_requested"] or not scope_allowed,
         }
 
     def get(self, discovery_id: str) -> dict:
         record = self.store.read("discoveries", discovery_id)
         if record is None:
             raise DiscoveryNotFound
-        return self._reconcile(record)
+        record = self._reconcile(record)
+        return _with_change_summary(record, self.store.list("discoveries"))
 
     def list(self, agent_id: str | None = None) -> list[dict]:
         records = [self._reconcile(item) for item in self.store.list("discoveries")]
         if agent_id is not None:
             records = [item for item in records if item["agent_id"] == agent_id]
         records.sort(key=lambda item: item["created_at"], reverse=True)
-        return records
+        return [_with_change_summary(item, records) for item in records]
 
     def _reconcile(self, record: dict) -> dict:
         changed = self._normalize(record)
@@ -498,6 +608,8 @@ class DiscoveryService:
             "current_scope": None,
             "total_scopes": 1,
             "public_scope_authorized": False,
+            "known_targets": [],
+            "follow_up_checks": [],
         }
         changed = False
         for key, value in defaults.items():
@@ -650,3 +762,84 @@ class DiscoveryService:
             return max(0, int(value))
         except (TypeError, ValueError):
             return fallback
+
+
+def _complete_discovery(record: dict) -> bool:
+    requested = set(record.get("requested_scopes") or [])
+    return (
+        record.get("status") == "completed"
+        and bool(record.get("site_id"))
+        and bool(record.get("completed_at"))
+        and bool(requested)
+        and set(record.get("completed_scopes") or []) == requested
+        and not record.get("failed_scopes")
+    )
+
+
+def _with_change_summary(record: dict, records: list[dict]) -> dict:
+    empty = {
+        "baseline_discovery_id": None,
+        "baseline_completed_at": None,
+        "new_host_count": 0,
+        "not_observed_count": 0,
+        "new_hosts": [],
+        "not_observed_hosts": [],
+    }
+    if not _complete_discovery(record):
+        return {**record, "change_summary": empty}
+    candidates = [
+        item
+        for item in records
+        if item.get("discovery_id") != record["discovery_id"]
+        and _complete_discovery(item)
+        and item.get("site_id") == record["site_id"]
+        and item.get("agent_id") == record["agent_id"]
+        and item.get("mode") == record.get("mode")
+        and set(item.get("requested_scopes") or [])
+        == set(record["requested_scopes"])
+        and set(item.get("known_targets") or [])
+        == set(record.get("known_targets") or [])
+        and item["created_at"] < record["created_at"]
+    ]
+    if not candidates:
+        return {**record, "change_summary": empty}
+    baseline = max(candidates, key=lambda item: item["created_at"])
+    current_hosts = {
+        item["ip"]: item
+        for item in record.get("devices", [])
+        if not item.get("is_agent")
+    }
+    baseline_hosts = {
+        item["ip"]: item
+        for item in baseline.get("devices", [])
+        if not item.get("is_agent")
+    }
+    new_ips = sorted(
+        current_hosts.keys() - baseline_hosts.keys(),
+        key=ipaddress.ip_address,
+    )
+    not_observed_ips = sorted(
+        baseline_hosts.keys() - current_hosts.keys(),
+        key=ipaddress.ip_address,
+    )
+
+    def summary_host(item: dict) -> dict:
+        return {
+            "device_id": item["device_id"],
+            "ip": item["ip"],
+            "hostname": item.get("hostname"),
+        }
+
+    return {
+        **record,
+        "change_summary": {
+            "baseline_discovery_id": baseline["discovery_id"],
+            "baseline_completed_at": baseline["completed_at"],
+            "new_host_count": len(new_ips),
+            "not_observed_count": len(not_observed_ips),
+            "new_hosts": [summary_host(current_hosts[ip]) for ip in new_ips[:128]],
+            "not_observed_hosts": [
+                summary_host(baseline_hosts[ip]) for ip in not_observed_ips[:128]
+            ],
+        },
+    }

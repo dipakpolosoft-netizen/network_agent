@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from forgesec_api.agents.service import AgentService, InvalidAgentCredential
@@ -21,6 +21,7 @@ AgentServiceDependency = Annotated[AgentService, Depends(get_agent_service)]
 def authenticate_agent(
     credentials: BearerCredentials,
     service: AgentServiceDependency,
+    request: Request,
 ) -> dict:
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(
@@ -28,7 +29,9 @@ def authenticate_agent(
             detail="Agent credential required",
         )
     try:
-        return service.authenticate(credentials.credentials)
+        agent = service.authenticate(credentials.credentials)
+        request.state.agent_id = agent["agent_id"]
+        return agent
     except InvalidAgentCredential as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

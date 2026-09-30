@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
+from pytest import MonkeyPatch
 
+from forgesec_api.security import hash_secret
 from forgesec_api.settings import Settings
 
 
@@ -13,6 +16,7 @@ def enrollment(client: TestClient) -> dict:
         json={"label": "Head Office Agent", "site_name": "Head Office"},
     )
     assert response.status_code == 201
+    assert response.headers["cache-control"] == "private, no-store"
     return response.json()
 
 
@@ -31,6 +35,7 @@ def enroll_agent(client: TestClient, token: str) -> dict:
         },
     )
     assert response.status_code == 201
+    assert response.headers["cache-control"] == "private, no-store"
     return response.json()
 
 
@@ -40,6 +45,24 @@ def test_health(client: TestClient) -> None:
     assert response.json()["status"] == "ok"
 
 
+def test_readiness_checks_storage_without_exposing_failure(
+    client: TestClient, monkeypatch: MonkeyPatch
+) -> None:
+    response = client.get("/ready")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
+    assert response.headers["cache-control"] == "no-store"
+
+    def unavailable(*_args):
+        raise RuntimeError("database-url-secret")
+
+    monkeypatch.setattr(client.app.state.store, "read", unavailable)
+    response = client.get("/ready")
+    assert response.status_code == 503
+    assert response.json() == {"status": "unavailable"}
+    assert "database-url-secret" not in response.text
+
+
 def test_enrollment_token_is_not_stored_in_plaintext(
     client: TestClient, settings: Settings
 ) -> None:
@@ -47,6 +70,41 @@ def test_enrollment_token_is_not_stored_in_plaintext(
     persisted = list((settings.runtime_data_dir / "enrollments").glob("*.json"))
     assert len(persisted) == 1
     assert created["enrollment_token"] not in persisted[0].read_text(encoding="utf-8")
+
+
+def test_expired_enrollment_fails_closed_and_is_audited_once(
+    client: TestClient, settings: Settings
+) -> None:
+    created = enrollment(client)
+    token = created["enrollment_token"]
+    store = client.app.state.store
+    key = hash_secret(token)
+    record = store.read("enrollments", key)
+    record["expires_at"] = "2020-01-01T00:00:00Z"
+    store.write("enrollments", key, record)
+    payload = {
+        "schema_version": "1.0",
+        "message_type": "agent.enroll.request",
+        "enrollment_token": token,
+        "agent_version": "0.1.0",
+        "hostname": "WIN-AGENT-01",
+        "os_name": "Windows 11",
+        "architecture": "x86_64",
+        "requested_at": datetime.now(UTC).isoformat(),
+    }
+    assert client.post("/agent/enroll", json=payload).status_code == 410
+    assert client.post("/agent/enroll", json=payload).status_code == 410
+    assert client.get("/api/agents").json() == []
+    events = [
+        json.loads(line)
+        for line in (settings.runtime_data_dir / "activity" / "activity.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    expired = [event for event in events if event["event_type"] == "enrollment.expired"]
+    assert len(expired) == 1
+    assert expired[0]["resource_id"] == created["enrollment_id"]
+    assert token not in json.dumps(expired[0])
 
 
 def test_agent_can_enroll_once_and_send_authenticated_heartbeat(

@@ -17,6 +17,10 @@ def _text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _placeholder(value: object) -> bool:
+    return _text(value).upper().startswith(("ACTUAL_", "ANOTHER_ACTUAL_"))
+
+
 def _network(value: object, label: str, errors: list[str]):
     try:
         network = ipaddress.ip_network(_text(value), strict=True)
@@ -66,7 +70,7 @@ def _url(value: object, label: str, *, remote: bool, errors: list[str]) -> None:
         errors.append(f"{label} must use HTTPS unless it is same-machine loopback")
 
 
-def validate(plan: object, *, today: date | None = None) -> list[str]:
+def validate(plan: object, *, today: date | None = None, mode: str = "authorization") -> list[str]:
     """Return all preparation errors; no network or filesystem writes occur."""
     if not isinstance(plan, dict):
         return ["Plan must be a JSON object"]
@@ -83,8 +87,8 @@ def validate(plan: object, *, today: date | None = None) -> list[str]:
         ("approval.approved_by", approval.get("approved_by")),
         ("probe.machine_name", probe.get("machine_name")),
     ):
-        if not _text(value):
-            errors.append(f"{label} is required")
+        if not _text(value) or _placeholder(value):
+            errors.append(f"{label} needs a real value, not a placeholder")
     if approval.get("confirmed") is not True:
         errors.append("approval.confirmed must be true after written authorization")
     try:
@@ -114,8 +118,10 @@ def validate(plan: object, *, today: date | None = None) -> list[str]:
             if approved and not item.subnet_of(approved):
                 errors.append(f"approval.exclusions[{index}] must be inside the approved CIDR")
             excluded.append(item)
-    if discovery and any(discovery.overlaps(item) for item in excluded):
-        errors.append("An exclusion overlaps the first discovery segment")
+    if discovery and excluded and all(
+        any(address in item for item in excluded) for address in discovery.hosts()
+    ):
+        errors.append("Exclusions cover the entire first discovery segment")
 
     profiles = approval.get("profiles")
     if not isinstance(profiles, list) or not profiles or any(profile not in ALLOWED_PROFILES for profile in profiles):
@@ -133,18 +139,27 @@ def validate(plan: object, *, today: date | None = None) -> list[str]:
     _url(server.get("dashboard_url"), "server.dashboard_url", remote=False, errors=errors)
     _url(server.get("agent_api_url"), "server.agent_api_url", remote=remote, errors=errors)
 
+    if mode == "authorization":
+        return errors
+    if mode != "accuracy":
+        return [f"Unknown validation mode: {mode}"]
+
     devices = plan.get("known_devices")
     if not isinstance(devices, list) or not 2 <= len(devices) <= 3:
         errors.append("known_devices must contain 2 or 3 baseline devices")
         devices = []
     seen = set()
+    has_known_tcp_port = False
     for index, device in enumerate(devices):
         label = f"known_devices[{index}]"
         if not isinstance(device, dict):
             errors.append(f"{label} must be an object")
             continue
-        if not _text(device.get("name")) or not _text(device.get("device_type")):
-            errors.append(f"{label} needs a name and expected device_type")
+        if any(
+            not _text(device.get(field)) or _placeholder(device.get(field))
+            for field in ("name", "device_type")
+        ):
+            errors.append(f"{label} needs a real name and expected device_type")
         ip = _address(device.get("ipv4"), f"{label}.ipv4", errors)
         if ip:
             if ip in seen or ip == probe_ip:
@@ -157,25 +172,33 @@ def validate(plan: object, *, today: date | None = None) -> list[str]:
         ports = device.get("expected_tcp_ports")
         if not isinstance(ports, list) or any(type(port) is not int or not 1 <= port <= 65535 for port in ports):
             errors.append(f"{label}.expected_tcp_ports must be a list of TCP ports 1-65535")
+        elif ports:
+            has_known_tcp_port = True
+    if devices and not has_known_tcp_port:
+        errors.append("At least one known device needs an expected open TCP port for the first scan")
     return errors
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("plan", type=Path, help="Local pilot-plan JSON file; never include tokens")
+    parser.add_argument("--mode", choices=("authorization", "accuracy"), default="authorization")
     args = parser.parse_args()
     try:
         plan = json.loads(args.plan.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         print(f"Cannot read pilot plan: {exc}", file=sys.stderr)
         return 2
-    errors = validate(plan)
+    errors = validate(plan, mode=args.mode)
     if errors:
         for error in errors:
             print(f"NOT READY: {error}")
         return 1
-    print("Pilot plan fields are valid. No site, token, or scan was created.")
-    print("Confirm approval, package hash, probe-reported segment, and server reachability before Step 15.")
+    print(f"Pilot {args.mode} fields are valid. No site, token, or scan was created.")
+    if args.mode == "authorization":
+        print("Known-device expectations are checked separately with --mode accuracy before the first accuracy pilot.")
+    else:
+        print("Confirm package hash, probe-reported segment, and server reachability before field testing.")
     return 0
 
 

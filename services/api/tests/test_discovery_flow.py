@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from approval_payload import approved_scope
 from fastapi.testclient import TestClient
 from test_enrollment_flow import enroll_agent, enrollment
 
@@ -35,7 +36,7 @@ def authenticated_agent(client: TestClient) -> dict:
     if not any(item["cidr"] == "192.168.1.0/24" for item in scopes):
         approved = client.post(
             f"/api/sites/{site_id}/scopes",
-            json={"cidr": "192.168.1.0/24", "label": "Test LAN"},
+            json=approved_scope("192.168.1.0/24", "Test LAN"),
         )
         assert approved.status_code == 201
     return enrolled
@@ -100,13 +101,26 @@ def test_discovery_command_claim_and_result_upload(client: TestClient) -> None:
                     "is_agent": False,
                     "first_seen": now,
                     "last_seen": now,
-                }
+                },
+                {
+                    "device_id": "device-192-168-1-25",
+                    "ip": "192.168.1.25",
+                    "hostname": "WIN-AGENT-01",
+                    "mac": None,
+                    "vendor": None,
+                    "status": "up",
+                    "discovery_reason": "arp-response",
+                    "latency_ms": 0.1,
+                    "is_agent": False,
+                    "first_seen": now,
+                    "last_seen": now,
+                },
             ],
             "error": None,
         },
     )
     assert uploaded.status_code == 200
-    assert uploaded.json()["device_count"] == 1
+    assert uploaded.json()["device_count"] == 2
 
     completed = client.post(
         f"/agent/commands/{command['command_id']}/events",
@@ -116,7 +130,7 @@ def test_discovery_command_claim_and_result_upload(client: TestClient) -> None:
             "message_type": "command.event",
             "status": "completed",
             "message": "Discovery completed",
-            "details": {"device_count": 1},
+            "details": {"device_count": 2},
             "occurred_at": datetime.now(UTC).isoformat(),
         },
     )
@@ -125,6 +139,113 @@ def test_discovery_command_claim_and_result_upload(client: TestClient) -> None:
     fetched = client.get(f"/api/discoveries/{discovery['discovery_id']}")
     assert fetched.status_code == 200
     assert fetched.json()["devices"][0]["ip"] == "192.168.1.1"
+    assert fetched.json()["devices"][1]["is_agent"] is True
+    assert client.get("/api/assets").json()["total"] == 1
+
+
+def test_known_host_checks_are_bounded_and_preserve_no_response(
+    client: TestClient,
+) -> None:
+    agent = authenticated_agent(client)
+    endpoint = f"/api/agents/{agent['agent_id']}/discover"
+    request = {
+        "authorization_confirmed": True,
+        "scope": "192.168.1.0/24",
+        "mode": "selected",
+    }
+    for targets in (
+        ["192.168.2.2"],
+        ["192.168.1.25"],
+        ["192.168.1.0"],
+        ["192.168.1.255"],
+        ["192.168.1.2", "192.168.1.2"],
+        ["192.168.1.1", "192.168.1.2", "192.168.1.3", "192.168.1.4"],
+    ):
+        assert client.post(
+            endpoint, json={**request, "known_targets": targets}
+        ).status_code == 422
+
+    created = client.post(
+        endpoint,
+        json={**request, "known_targets": ["192.168.1.1", "192.168.1.2"]},
+    )
+    assert created.status_code == 202
+    discovery_id = created.json()["discovery_id"]
+    command = client.app.state.store.read("commands", created.json()["command_id"])
+    assert command["payload"]["known_targets"] == ["192.168.1.1", "192.168.1.2"]
+    now = datetime.now(UTC).isoformat()
+    payload = {
+        "schema_version": "1.0",
+        "message_type": "discovery.result",
+        "discovery_id": discovery_id,
+        "agent_id": agent["agent_id"],
+        "network": "192.168.1.0/24",
+        "interface_name": "Ethernet",
+        "status": "completed",
+        "started_at": now,
+        "completed_at": now,
+        "devices": [{
+            "device_id": "device-192-168-1-1",
+            "ip": "192.168.1.1",
+            "status": "up",
+            "discovery_reason": "arp-response",
+            "is_agent": False,
+            "first_seen": now,
+            "last_seen": now,
+        }],
+        "follow_up_checks": [
+            {
+                "ip": "192.168.1.1",
+                "status": "already_discovered",
+                "method": "initial_discovery",
+                "checked_at": now,
+                "reason": "arp-response",
+            },
+            {
+                "ip": "192.168.1.2",
+                "status": "no_response",
+                "method": "targeted_tcp_icmp",
+                "checked_at": now,
+                "reason": "no-response",
+            },
+        ],
+        "error": None,
+    }
+    upload_path = f"/agent/discoveries/{discovery_id}/devices"
+    headers = {"Authorization": f"Bearer {agent['agent_credential']}"}
+    invalid = {**payload, "follow_up_checks": [
+        {**payload["follow_up_checks"][1], "ip": "192.168.1.1"}
+    ]}
+    assert client.post(upload_path, headers=headers, json=invalid).status_code == 422
+    uploaded = client.post(upload_path, headers=headers, json=payload)
+    assert uploaded.status_code == 200, uploaded.text
+    saved = client.get(f"/api/discoveries/{discovery_id}").json()
+    assert saved["known_targets"] == ["192.168.1.1", "192.168.1.2"]
+    assert [item["status"] for item in saved["follow_up_checks"]] == [
+        "already_discovered", "no_response"
+    ]
+    assert saved["device_count"] == 1
+    assert client.get("/api/assets").json()["total"] == 1
+
+    older_probe = client.post(
+        endpoint,
+        json={**request, "known_targets": ["192.168.1.2"]},
+    )
+    assert older_probe.status_code == 202
+    missing_checks = {
+        **payload,
+        "discovery_id": older_probe.json()["discovery_id"],
+        "devices": [],
+        "follow_up_checks": [],
+    }
+    incomplete = client.post(
+        f"/agent/discoveries/{older_probe.json()['discovery_id']}/devices",
+        headers=headers,
+        json=missing_checks,
+    )
+    assert incomplete.status_code == 200
+    assert incomplete.json()["status"] == "partial"
+    assert "not reported" in incomplete.json()["error"]
 
 
 def test_discovery_requires_scanner_dependencies(client: TestClient) -> None:
@@ -203,6 +324,52 @@ def test_discovery_rejects_devices_outside_reported_network(
         },
     )
     assert response.status_code == 422
+
+
+def test_timed_out_segment_keeps_partial_host_evidence(client: TestClient) -> None:
+    agent = authenticated_agent(client)
+    authorization = {"Authorization": f"Bearer {agent['agent_credential']}"}
+    created = client.post(
+        f"/api/agents/{agent['agent_id']}/discover",
+        json={"authorization_confirmed": True, "scope": "192.168.1.0/24"},
+    ).json()
+    now = datetime.now(UTC).isoformat()
+    uploaded = client.post(
+        f"/agent/discoveries/{created['discovery_id']}/devices",
+        headers=authorization,
+        json={
+            "schema_version": "1.0",
+            "message_type": "discovery.result",
+            "discovery_id": created["discovery_id"],
+            "agent_id": agent["agent_id"],
+            "network": "192.168.1.0/24",
+            "interface_name": "Ethernet",
+            "status": "partial",
+            "started_at": now,
+            "completed_at": now,
+            "devices": [{
+                "device_id": "device-partial-host",
+                "ip": "192.168.1.20",
+                "status": "up",
+                "discovery_reason": "arp-response",
+                "is_agent": False,
+                "first_seen": now,
+                "last_seen": now,
+            }],
+            "requested_scopes": ["192.168.1.0/24"],
+            "completed_scopes": [],
+            "failed_scopes": ["192.168.1.0/24"],
+            "error": "1 segment(s) failed",
+        },
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    saved = client.get(f"/api/discoveries/{created['discovery_id']}").json()
+    assert saved["status"] == "partial"
+    assert saved["completed_scopes"] == []
+    assert saved["failed_scopes"] == ["192.168.1.0/24"]
+    assert saved["devices"][0]["discovery_reason"] == "arp-response"
+    assert saved["devices"][0]["last_seen"] == now.replace("+00:00", "Z")
+    assert client.get("/api/assets").json()["total"] == 1
 
 
 def test_failed_command_updates_discovery_terminal_state(client: TestClient) -> None:
@@ -302,7 +469,7 @@ def public_slash_22_heartbeat(client: TestClient, agent: dict) -> None:
     site_id = client.get("/api/agents").json()[0]["site_id"]
     approved = client.post(
         f"/api/sites/{site_id}/scopes",
-        json={"cidr": "172.168.0.0/22", "label": "Authorized test range"},
+        json=approved_scope("172.168.0.0/22", "Authorized test range"),
     )
     assert approved.status_code == 201
     response = client.post(

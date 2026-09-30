@@ -47,10 +47,12 @@ class FixtureNmap:
         self,
         network: str,
         *,
+        exclusions,
         cancel_requested,
         progress_callback,
     ) -> str:
         assert network == "192.168.1.0/24"
+        assert exclusions == []
         assert cancel_requested() is False
         progress_callback(DiscoveryProgress(1, 100.0, 2))
         return DISCOVERY_XML
@@ -60,6 +62,7 @@ HOST_SCAN_XML = """<?xml version="1.0"?>
 <nmaprun scanner="nmap">
   <host>
     <status state="up" reason="user-set" />
+    <address addr="192.168.1.1" addrtype="ipv4" />
     <hostnames><hostname name="gateway.local" type="PTR" /></hostnames>
     <ports>
       <port protocol="tcp" portid="22">
@@ -145,7 +148,14 @@ def main() -> int:
             assert isinstance(sites, list) and len(sites) == 1
             approved_scope = request_json(
                 f"{server_url}/api/sites/{sites[0]['site_id']}/scopes",
-                {"cidr": "192.168.1.0/24", "label": "Smoke test LAN"},
+                {
+                    "cidr": "192.168.1.0/24", "label": "Smoke test LAN",
+                    "owner": "Synthetic smoke-test owner",
+                    "approval_reference": "SMOKE-001",
+                    "approved_by": "Smoke test",
+                    "expires_on": "2099-12-31",
+                    "authorization_confirmed": True,
+                },
             )
             assert isinstance(approved_scope, dict)
 
@@ -208,6 +218,9 @@ def main() -> int:
                 f"{server_url}/api/discoveries/{discovery['discovery_id']}"
             )
             assert isinstance(discovery_result, dict)
+            assert discovery_result["status"] == "completed", discovery_result.get(
+                "error"
+            )
             selected_device = next(
                 device
                 for device in discovery_result["devices"]
@@ -241,7 +254,7 @@ def main() -> int:
             assert agents[0]["status"] == "online"
             result = request_json(f"{server_url}/api/scans/{scan['scan_id']}")
             assert isinstance(result, dict)
-            assert result["status"] == "completed"
+            assert result["status"] == "completed", result["results"]
             assert result["completed"] == 1
             assert len(result["results"]) == 1
             assert result["summary"]["open_ports"] == 1

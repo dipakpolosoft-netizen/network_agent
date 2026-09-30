@@ -9,16 +9,27 @@ import {
   History,
   LoaderCircle,
   Radar,
+  Server,
   ShieldAlert,
   ShieldCheck,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { PortResult, Scan, ScanVulnerabilitySummary, api } from "@/lib/api";
+import { nvdDataAge } from "@/lib/nvd-evidence";
+import { hostnameSourceLabel } from "@/lib/host-evidence";
+import { countPortStates, countScanPortStates, portCpes, portEvidenceSourceLabel, portEvidenceTimeLabel, portServiceLabel } from "@/lib/port-evidence";
+import { profilePlanLines } from "@/lib/scan-profiles";
 import { downloadScanJson, downloadScanPdf } from "@/lib/report-downloads";
+import { scanCoverageNotice } from "@/lib/report-status";
 
 function titleCase(value: string) {
   return value.replaceAll("_", " ").replaceAll("-", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function reportTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString(undefined, { timeZoneName: "short" });
 }
 
 function scanProfileLabel(value: string) {
@@ -41,13 +52,6 @@ type SeverityKey = "high" | "medium" | "low" | "info";
 const SEVERITY_KEYS: SeverityKey[] = ["high", "medium", "low", "info"];
 const VULNERABILITY_SEVERITY_KEYS = ["critical", "high", "medium", "low", "unknown"] as const;
 
-function portEvidenceLabel(port: PortResult) {
-  const service = port.service?.trim() || `${port.port}/${port.protocol}`;
-  const fingerprint = [port.product, port.version].filter(Boolean).join(" ");
-  const suffix = fingerprint || port.extrainfo || port.devicetype || "";
-  return suffix ? `${service} - ${suffix}` : service;
-}
-
 function targetInventoryLabel(target: Scan["targets"][number]) {
   const parts = [
     target.snmp_location,
@@ -65,6 +69,24 @@ function statusTone(value: string) {
 
 function Status({ value, label }: { value: string; label?: string }) {
   return <span className={`status ${statusTone(value)}`}><span />{label ?? titleCase(value)}</span>;
+}
+
+function PortEvidenceTable({ ports }: { ports: PortResult[] }) {
+  const [visible, setVisible] = useState(20);
+  return <div className="report-port-evidence">
+    <div className="table-scroll"><table><thead><tr><th>Port</th><th>State</th><th>Service</th><th>Product</th><th>Version</th><th>CPE</th><th>Source / scan end</th></tr></thead><tbody>
+      {ports.slice(0, visible).map((port) => <tr key={`${port.protocol}-${port.port}`}>
+        <td><code>{port.port}/{port.protocol}</code></td>
+        <td><Status value={port.state} /></td>
+        <td>{portServiceLabel(port)}</td>
+        <td>{port.product ?? "Not identified"}</td>
+        <td>{port.version ?? "Not identified"}</td>
+        <td>{portCpes(port).length ? portCpes(port).map((cpe) => <code className="report-port-cpe" key={cpe}>{cpe}</code>) : "Not observed"}</td>
+        <td><strong>{portEvidenceSourceLabel(port)}</strong><small>{portEvidenceTimeLabel(port)}</small></td>
+      </tr>)}
+    </tbody></table></div>
+    {visible < ports.length && <button className="button secondary" type="button" onClick={() => setVisible((count) => count + 100)}>Show more ({Math.min(visible, ports.length)} of {ports.length})</button>}
+  </div>;
 }
 
 function ReportStat({ label, value, detail }: { label: string; value: string; detail: string }) {
@@ -96,7 +118,7 @@ function vulnerabilitySeverityTotal(summary: ScanVulnerabilitySummary) {
 
 function affectedServiceLabel(item: ScanVulnerabilitySummary["items"][number]) {
   const first = item.affected_services[0];
-  if (!first) return "No affected service evidence";
+  if (!first) return "No observed service evidence";
   const host = first.hostname || first.ip;
   const service = first.service || `${first.port}/${first.protocol}`;
   const more = item.affected_service_count > 1
@@ -107,10 +129,8 @@ function affectedServiceLabel(item: ScanVulnerabilitySummary["items"][number]) {
 
 function changeTotal(scan: Scan) {
   const changes = scan.change_summary;
-  return changes.new_host_count
-    + changes.missing_host_count
-    + changes.opened_port_count
-    + changes.closed_port_count
+  return changes.opened_port_count
+    + (changes.no_longer_confirmed_port_count ?? changes.closed_port_count)
     + changes.new_finding_count
     + changes.resolved_finding_count;
 }
@@ -118,10 +138,6 @@ function changeTotal(scan: Scan) {
 function portChangeLabel(port: Scan["change_summary"]["opened_ports"][number]) {
   const host = port.hostname || port.ip;
   return `${host} - ${port.port}/${port.protocol} ${port.service ?? "unknown"}`;
-}
-
-function hostChangeLabel(host: Scan["change_summary"]["new_hosts"][number]) {
-  return `${host.hostname || host.ip}${host.device_type ? ` - ${titleCase(host.device_type)}` : ""}`;
 }
 
 export function ScanReportPage({ scanId }: { scanId: string }) {
@@ -132,17 +148,28 @@ export function ScanReportPage({ scanId }: { scanId: string }) {
   const [vulnerabilityLoading, setVulnerabilityLoading] = useState(false);
   const [vulnerabilityError, setVulnerabilityError] = useState<string | null>(null);
   const [canRefreshIntelligence, setCanRefreshIntelligence] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [jsonBusy, setJsonBusy] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    let sequence = 0;
+    let applied = 0;
     async function load() {
+      const request = ++sequence;
       try {
         const next = await api.scanReport(scanId);
-        if (cancelled) return;
+        if (cancelled || request < applied) return;
+        applied = request;
         setScan(next);
         setError(null);
       } catch (cause) {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : "Report could not be loaded");
+        if (!cancelled && request >= applied) {
+          applied = request;
+          setError(cause instanceof Error ? cause.message : "Report could not be loaded");
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -153,7 +180,7 @@ export function ScanReportPage({ scanId }: { scanId: string }) {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [scanId]);
+  }, [scanId, refreshKey]);
 
   useEffect(() => {
     setVulnerabilitySummary(null);
@@ -183,6 +210,32 @@ export function ScanReportPage({ scanId }: { scanId: string }) {
     }
   }
 
+  async function exportJson(item: Scan) {
+    if (jsonBusy) return;
+    setJsonBusy(true);
+    setExportError(null);
+    try {
+      await downloadScanJson(item.scan_id);
+    } catch (cause) {
+      setExportError(cause instanceof Error ? cause.message : "JSON export failed");
+    } finally {
+      setJsonBusy(false);
+    }
+  }
+
+  async function exportPdf(item: Scan) {
+    if (pdfBusy) return;
+    setPdfBusy(true);
+    setExportError(null);
+    try {
+      await downloadScanPdf(item.scan_id);
+    } catch (cause) {
+      setExportError(cause instanceof Error ? cause.message : "PDF export failed");
+    } finally {
+      setPdfBusy(false);
+    }
+  }
+
   const resultByDevice = useMemo(
     () => new Map(scan?.results.map((result) => [result.device_id, result]) ?? []),
     [scan],
@@ -202,9 +255,12 @@ export function ScanReportPage({ scanId }: { scanId: string }) {
   const completion = scan.total ? clampPercent((finished / scan.total) * 100) : 0;
   const findings = scan.summary.exposure_findings;
   const highFindings = scan.summary.high_exposure_findings;
-  const ports = scan.summary.open_ports;
-  const fingerprints = scan.summary.service_fingerprints;
-  const active = ["queued", "running"].includes(scan.status);
+  const portCounts = countScanPortStates(scan);
+  const ports = portCounts.open;
+  const timedOutHosts = scan.summary.timed_out_hosts ?? scan.results.filter((result) => result.status === "timed_out").length;
+  const failedHosts = scan.summary.failed_hosts ?? scan.results.filter((result) => result.status === "failed").length;
+  const active = ["queued", "running", "cancelling"].includes(scan.status);
+  const coverageNotice = scanCoverageNotice(scan);
   const severityCounts = scan.summary.severity_counts;
   const severityTotal = Math.max(1, findings);
   const serviceRows = scan.summary.services.slice(0, 6);
@@ -215,6 +271,8 @@ export function ScanReportPage({ scanId }: { scanId: string }) {
   const evidenceQuality = scan.total ? clampPercent((evidenceHosts / scan.total) * 100) : 0;
   const posture = active
     ? "Evidence collection is still running"
+    : coverageNotice
+      ? highFindings ? "Incomplete scan; priority review" : findings ? "Incomplete scan; findings need review" : "Incomplete coverage"
     : highFindings
       ? "Priority review required"
       : findings
@@ -224,6 +282,8 @@ export function ScanReportPage({ scanId }: { scanId: string }) {
           : titleCase(scan.status);
   const summaryCopy = active
     ? `${scan.running} host${scan.running === 1 ? "" : "s"} currently running and ${scan.queued} queued. This report refreshes while the agent sends progress.`
+    : coverageNotice
+      ? `${scan.completed} of ${scan.total} targets completed successfully. ${scan.results.length} host result${scan.results.length === 1 ? "" : "s"} received; findings reflect only the evidence that arrived.`
     : highFindings
       ? `${highFindings} high severity finding${highFindings === 1 ? "" : "s"} should be reviewed before closing this report.`
       : findings
@@ -241,23 +301,46 @@ export function ScanReportPage({ scanId }: { scanId: string }) {
           <div className="report-hero-actions">
             <a className="button secondary" href="/network-agent#history"><ArrowLeft size={15} />History</a>
             <div className="report-export-group">
-              <button className="button secondary" onClick={() => downloadScanJson(scan)}><Download size={15} />JSON</button>
-              <button className="button primary" onClick={() => downloadScanPdf(scan)}><FileText size={15} />PDF</button>
+              <button className="button secondary" disabled={jsonBusy} onClick={() => void exportJson(scan)}>{jsonBusy ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}{jsonBusy ? "Exporting" : "JSON"}</button>
+              <button className="button primary" disabled={pdfBusy} onClick={() => void exportPdf(scan)}>{pdfBusy ? <LoaderCircle className="spin" size={15} /> : <FileText size={15} />}{pdfBusy ? "Creating PDF" : "PDF"}</button>
             </div>
           </div>
+          {exportError && <div className="inline-error" role="alert"><ShieldAlert size={15} />{exportError}</div>}
+          {error && <div className="inline-error" role="alert"><ShieldAlert size={15} />Report refresh failed: {error}. Showing the last loaded snapshot.<button className="button secondary compact" type="button" onClick={() => setRefreshKey((value) => value + 1)}>Retry</button></div>}
+          {coverageNotice && <div className="report-intelligence-warning" role="status"><ShieldAlert size={15} /><span>{coverageNotice}</span></div>}
           <p>{scanProfileLabel(scan.profile)} scan for {scan.total} selected target{scan.total === 1 ? "" : "s"}. The page presents the stored evidence in report form; raw JSON is available only from the download action.</p>
           <div className="report-meta">
             <span>Scan ID <strong>{scan.scan_id}</strong></span>
-            <span>Created <strong>{new Date(scan.created_at).toLocaleString()}</strong></span>
-            <span>Started <strong>{scan.started_at ? new Date(scan.started_at).toLocaleString() : "Pending"}</strong></span>
-            <span>Completed <strong>{scan.completed_at ? new Date(scan.completed_at).toLocaleString() : "Pending"}</strong></span>
+            <span>Created <strong>{reportTime(scan.created_at)}</strong></span>
+            <span>Started <strong>{scan.started_at ? reportTime(scan.started_at) : "Pending"}</strong></span>
+            <span>Completed <strong>{scan.completed_at ? reportTime(scan.completed_at) : "Pending"}</strong></span>
           </div>
+          <details className="report-data-handling"><summary>Data handling</summary><p>Server evidence has no automatic expiry. Downloaded copies remain on your computer and cannot be revoked by ForgeSec. Follow your organization&apos;s retention policy.</p></details>
+        </section>
+
+        <section className="report-origin" aria-label="Scan origin">
+          <div className="report-origin-heading"><Server size={17} /><div><span className="eyebrow">SCAN ORIGIN</span><h2>{scan.scan_origin?.hostname ?? "Probe snapshot unavailable"}</h2></div></div>
+          {scan.scan_origin ? <>
+            <dl>
+              <div><dt>Probe ID</dt><dd>{scan.scan_origin.agent_id}</dd></div>
+              <div><dt>Probe IP</dt><dd>{scan.scan_origin.local_ip ?? "Not reported"}</dd></div>
+              <div><dt>Site / network</dt><dd>{[scan.scan_origin.site_name, scan.scan_origin.subnet].filter(Boolean).join(" / ") || "Not reported"}</dd></div>
+              <div><dt>Interface</dt><dd>{scan.scan_origin.discovery_interface ?? "Not reported"}</dd></div>
+              <div><dt>System</dt><dd>{scan.scan_origin.os_name} / agent v{scan.scan_origin.agent_version}</dd></div>
+            </dl>
+            <p>{scan.scan_origin.source === "scan_snapshot" ? "Probe-reported at scan creation" : "Latest saved probe record; scan-time IP was not saved"}{scan.scan_origin.last_heartbeat_at ? `, heartbeat ${reportTime(scan.scan_origin.last_heartbeat_at)}` : ""}. Not included in target or finding totals.</p>
+          </> : <><dl><div><dt>Probe ID</dt><dd>{scan.agent_id}</dd></div></dl><p>The saved scan identifies this probe, but did not record its scan-time hostname or IP. The scanning computer is not included in target or finding totals.</p></>}
+        </section>
+
+        <section className="report-profile-scope" aria-label="Requested scan scope">
+          <div><span className="eyebrow">REQUESTED PROFILE</span><h2>{scanProfileLabel(scan.profile)}</h2></div>
+          <ul>{profilePlanLines(scan.profile_plan).map((line) => <li key={line}>{line}</li>)}</ul>
         </section>
 
         <section className="report-stat-grid">
           <ReportStat label="Status" value={titleCase(scan.status)} detail={active ? titleCase(scan.stage ?? scan.status) : `${completion}% finished`} />
           <ReportStat label="Targets" value={String(scan.total)} detail={`${finished} finished`} />
-          <ReportStat label="Open ports" value={String(ports)} detail={`${fingerprints} fingerprints`} />
+          <ReportStat label="Confirmed open" value={String(ports)} detail={`${portCounts.openFiltered} open|filtered`} />
           <ReportStat label="Findings" value={String(findings)} detail={`${highFindings} high severity`} />
         </section>
 
@@ -266,10 +349,10 @@ export function ScanReportPage({ scanId }: { scanId: string }) {
             <div><span className="eyebrow">EXECUTIVE SUMMARY</span><h2>{posture}</h2></div>
             <p>{summaryCopy}</p>
             <div className="report-summary-meter"><span style={{ width: `${completion}%` }} /></div>
-            <small>{completion}% of selected targets have finished processing.</small>
+            <small>{active ? `${completion}% of selected targets have finished processing.` : `${finished} of ${scan.total} targets reached a final state; ${scan.completed} completed successfully.`}</small>
           </article>
           <article className="report-digest-card">
-            <div className="report-section-header compact"><div><span className="eyebrow">SEVERITY MIX</span><h2>Exposure findings</h2></div><Status value={highFindings ? "high" : findings ? "medium" : "completed"} label={findings ? `${findings} total` : "Clean"} /></div>
+            <div className="report-section-header compact"><div><span className="eyebrow">SEVERITY MIX</span><h2>Exposure findings</h2></div><Status value={highFindings ? "high" : findings ? "medium" : coverageNotice ? "idle" : "completed"} label={findings ? `${findings} observed` : coverageNotice ? "Incomplete" : "No findings"} /></div>
             <div className="report-severity-list">
               {SEVERITY_KEYS.map((key) => <div key={key}><span>{titleCase(key)}</span><strong>{severityCounts[key]}</strong><div><i className={key} style={{ width: `${Math.max(4, (severityCounts[key] / severityTotal) * 100)}%` }} /></div></div>)}
             </div>
@@ -281,11 +364,11 @@ export function ScanReportPage({ scanId }: { scanId: string }) {
         </section>
 
         <section className="report-panel">
-          <div className="report-section-header"><div><span className="eyebrow">ACTION PLAN</span><h2>Recommended next steps</h2></div><Status value={actionSummary.risk_level} label={`${titleCase(actionSummary.risk_level)} risk`} /></div>
+          <div className="report-section-header"><div><span className="eyebrow">ACTION PLAN</span><h2>Recommended next steps</h2></div><Status value={coverageNotice ? "idle" : actionSummary.risk_level} label={coverageNotice ? "Partial evidence" : `${titleCase(actionSummary.risk_level)} risk`} /></div>
           <div className="report-action-grid">
             <div className="report-risk-score">
               <div className="report-quality-ring" style={{ background: `conic-gradient(var(--brand-mauve) ${actionSummary.risk_score * 3.6}deg, #edf1f0 0deg)` }}><strong>{actionSummary.risk_score}</strong><span>Score</span></div>
-              <small>Risk score is derived from exposure findings, scan drift, management services, SNMP visibility, and CPE evidence.</small>
+              <small>{coverageNotice ? "Risk score reflects only evidence received so far. " : ""}Risk score is derived from exposure findings, scan drift, management services, SNMP visibility, and CPE evidence.</small>
             </div>
             <div className="report-action-list">
               {actionSummary.priority_actions.map((action) => <article key={`${action.category}-${action.title}`}><Status value={action.priority} /><div><strong>{action.title}</strong><span>{action.detail}</span></div><small>{action.affected_count} affected</small></article>)}
@@ -299,26 +382,24 @@ export function ScanReportPage({ scanId }: { scanId: string }) {
             <div className="report-change-panel">
               <div className="report-change-baseline">
                 <History size={17} />
-                <div><strong>{scanProfileLabel(changes.baseline_profile ?? scan.profile)} baseline</strong><span>{changes.baseline_created_at ? new Date(changes.baseline_created_at).toLocaleString() : "Previous scan"} - {changes.baseline_scan_id}</span></div>
+                <div><strong>{scanProfileLabel(changes.baseline_profile ?? scan.profile)} baseline</strong><span>{changes.baseline_created_at ? reportTime(changes.baseline_created_at) : "Previous scan"} - {changes.baseline_scan_id}</span></div>
               </div>
               <div className="report-change-stats">
-                <ReportStat label="New hosts" value={String(changes.new_host_count)} detail={`${changes.missing_host_count} missing`} />
-                <ReportStat label="Opened ports" value={String(changes.opened_port_count)} detail={`${changes.closed_port_count} closed`} />
-                <ReportStat label="New findings" value={String(changes.new_finding_count)} detail={`${changes.resolved_finding_count} resolved`} />
+                <ReportStat label="New confirmed open" value={String(changes.opened_port_count)} detail={`${changes.no_longer_confirmed_port_count ?? changes.closed_port_count} no longer confirmed`} />
+                <ReportStat label="New findings" value={String(changes.new_finding_count)} detail={`${changes.resolved_finding_count} no longer reported`} />
+                <ReportStat label="Targets compared" value={String(scan.total)} detail="Same selection and profile" />
                 <ReportStat label="Total changes" value={String(totalChanges)} detail="Since baseline" />
               </div>
               {totalChanges ? (
                 <div className="report-change-grid">
-                  <ChangeList title="New hosts" items={changes.new_hosts.map(hostChangeLabel)} empty="No new hosts" />
-                  <ChangeList title="Missing hosts" items={changes.missing_hosts.map(hostChangeLabel)} empty="No missing hosts" />
-                  <ChangeList title="Opened ports" items={changes.opened_ports.map(portChangeLabel)} empty="No opened ports" />
-                  <ChangeList title="Closed ports" items={changes.closed_ports.map(portChangeLabel)} empty="No closed ports" />
+                  <ChangeList title="New confirmed open" items={changes.opened_ports.map(portChangeLabel)} empty="No new confirmed open ports" />
+                  <ChangeList title="No longer confirmed open" items={(changes.no_longer_confirmed_ports ?? changes.closed_ports).map(portChangeLabel)} empty="No loss of confirmed-open evidence" />
                   <ChangeList title="New findings" items={changes.new_findings.map((finding) => `${finding.hostname || finding.ip} - ${finding.title}`)} empty="No new findings" />
-                  <ChangeList title="Resolved findings" items={changes.resolved_findings.map((finding) => `${finding.hostname || finding.ip} - ${finding.title}`)} empty="No resolved findings" />
+                  <ChangeList title="Findings no longer reported" items={changes.resolved_findings.map((finding) => `${finding.hostname || finding.ip} - ${finding.title}`)} empty="No findings stopped being reported" />
                 </div>
-              ) : <div className="report-empty compact"><ShieldCheck size={18} /><strong>No scan drift detected</strong><p>The comparable previous scan reported the same hosts, ports, and rule-based findings.</p></div>}
+              ) : <div className="report-empty compact"><ShieldCheck size={18} /><strong>No scan drift detected</strong><p>The comparable previous scan reported the same confirmed-open ports and rule-based findings.</p></div>}
             </div>
-          ) : <div className="report-empty compact"><History size={18} /><strong>No comparable baseline yet</strong><p>Run this same scan profile again for the selected agent to see new hosts, missing hosts, opened ports, closed ports, and finding changes.</p></div>}
+          ) : <div className="report-empty compact"><History size={18} /><strong>No comparable baseline yet</strong><p>Repeat a completed scan with the same probe, site, profile, and selected targets to compare ports and findings.</p></div>}
         </section>
 
         <section className="report-panel">
@@ -337,8 +418,10 @@ export function ScanReportPage({ scanId }: { scanId: string }) {
               <div className="report-surface-grid">
                 <div><span>Management</span><strong>{scan.summary.management_services}</strong></div>
                 <div><span>SNMP</span><strong>{scan.summary.snmp_enabled}</strong></div>
-                <div><span>UDP ports</span><strong>{scan.summary.udp_ports}</strong></div>
+                <div><span>Open UDP</span><strong>{portCounts.udpOpen}</strong></div>
                 <div><span>CPEs</span><strong>{scan.summary.cpes}</strong></div>
+                <div><span>Open|filtered</span><strong>{portCounts.openFiltered}</strong></div>
+                <div><span>Filtered</span><strong>{portCounts.filtered}</strong></div>
               </div>
             </div>
           </div>
@@ -352,20 +435,20 @@ export function ScanReportPage({ scanId }: { scanId: string }) {
             <div className="report-vulnerability-panel">
               <div className="report-vulnerability-callout">
                 <div>
-                  <strong>{vulnerabilitySummary ? `${vulnerabilitySummary.total_vulnerabilities} potential CVE matches` : "No saved CVE assessment"}</strong>
-                  <span>{vulnerabilitySummary ? `${vulnerabilitySummary.checked_cpes} of ${vulnerabilitySummary.total_cpes} fingerprints assessed on ${new Date(vulnerabilitySummary.assessed_at).toLocaleString()} (${vulnerabilitySummary.cached_lookups} cached). ${vulnerabilitySummary.known_exploited} known exploited match${vulnerabilitySummary.known_exploited === 1 ? "" : "es"}.` : "An operator can correlate detected product/version fingerprints with NVD."}</span>
+                  <strong>{vulnerabilitySummary ? vulnerabilitySummary.failed_cpes || vulnerabilitySummary.skipped_cpes || vulnerabilitySummary.partial_cpes ? "Partial CVE assessment" : `${vulnerabilitySummary.total_vulnerabilities} potential CVE matches` : "No saved CVE assessment"}</strong>
+                  <span>{vulnerabilitySummary ? `${vulnerabilitySummary.checked_cpes} of ${vulnerabilitySummary.total_cpes} fingerprints assessed on ${reportTime(vulnerabilitySummary.assessed_at)} (${vulnerabilitySummary.cached_lookups} cached). ${vulnerabilitySummary.known_exploited} known exploited match${vulnerabilitySummary.known_exploited === 1 ? "" : "es"}.` : "An operator can correlate detected product/version fingerprints with NVD."}</span>
                 </div>
                 {canRefreshIntelligence && <button className="button primary" disabled={vulnerabilityLoading} onClick={() => void loadVulnerabilitySummary()}>{vulnerabilityLoading ? <LoaderCircle className="spin" size={15} /> : <ShieldAlert size={15} />}{vulnerabilitySummary ? "Reassess CVEs" : "Correlate CVEs"}</button>}
               </div>
               {vulnerabilityError && <div className="inline-error"><ShieldAlert size={15} /><span>{vulnerabilityError}</span></div>}
               {vulnerabilitySummary && !vulnerabilitySummary.evidence_current && <div className="report-intelligence-warning"><ShieldAlert size={15} /><span>Scan evidence changed after this assessment. Refresh CVEs before using these matches.</span></div>}
-              {vulnerabilitySummary && (vulnerabilitySummary.failed_cpes > 0 || vulnerabilitySummary.skipped_cpes > 0) && <div className="report-intelligence-warning"><ShieldAlert size={15} /><span>{vulnerabilitySummary.failed_cpes} lookups failed; {vulnerabilitySummary.skipped_cpes} fingerprints were skipped by the request limit. This is a partial assessment.</span></div>}
+              {vulnerabilitySummary && (vulnerabilitySummary.failed_cpes > 0 || vulnerabilitySummary.skipped_cpes > 0 || vulnerabilitySummary.partial_cpes > 0) && <div className="report-intelligence-warning"><ShieldAlert size={15} /><span>{vulnerabilitySummary.failed_cpes} lookups failed; {vulnerabilitySummary.skipped_cpes} fingerprints skipped; {vulnerabilitySummary.partial_cpes ?? 0} NVD result sets capped. Counts and severity cover only returned CVEs.</span></div>}
               {vulnerabilitySummary && (
                 <>
                   <div className="report-vulnerability-stats">
-                    <ReportStat label="Critical" value={String(vulnerabilitySummary.severity_counts.critical)} detail="Returned CVEs" />
-                    <ReportStat label="High" value={String(vulnerabilitySummary.severity_counts.high)} detail="Returned CVEs" />
-                    <ReportStat label="Known exploited" value={String(vulnerabilitySummary.known_exploited)} detail="CISA KEV signal" />
+                    <ReportStat label="Critical" value={String(vulnerabilitySummary.severity_counts.critical)} detail="Returned matches" />
+                    <ReportStat label="High" value={String(vulnerabilitySummary.severity_counts.high)} detail="Returned matches" />
+                    <ReportStat label="Known-exploited matches" value={String(vulnerabilitySummary.known_exploited)} detail="Device applicability unverified" />
                     <ReportStat label="Checked" value={String(vulnerabilitySummary.checked_cpes)} detail={`${vulnerabilitySummary.skipped_cpes} skipped by limit`} />
                   </div>
                   <div className="report-severity-list">
@@ -381,11 +464,12 @@ export function ScanReportPage({ scanId }: { scanId: string }) {
                         <>
                           <div className="report-vulnerability-meta">
                             <span>{item.returned} returned</span>
-                            <span>{item.total} total</span>
-                            <span>{item.known_exploited} known exploited</span>
-                            <span>{item.affected_service_count} affected service{item.affected_service_count === 1 ? "" : "s"}</span>
+                            <span>{item.total} NVD matches{item.truncated ? " (partial)" : ""}</span>
+                            <span>{item.known_exploited} KEV signals</span>
+                            <span>{item.affected_service_count} observed service{item.affected_service_count === 1 ? "" : "s"}</span>
+                            <span title={item.retrieved_at ? reportTime(item.retrieved_at) : "Retrieval time unavailable"}>NVD data {nvdDataAge(item.retrieved_at)}{item.cached ? " (cached)" : ""}</span>
                           </div>
-                          {item.top_vulnerabilities.length ? <div className="report-cve-list">{item.top_vulnerabilities.slice(0, 3).map((vulnerability) => <div key={vulnerability.cve_id}><a href={`https://nvd.nist.gov/vuln/detail/${vulnerability.cve_id}`} target="_blank" rel="noreferrer">{vulnerability.cve_id}<ExternalLink size={11} /></a><Status value={vulnerability.severity} />{vulnerability.cvss_score != null && <strong>CVSS {vulnerability.cvss_score.toFixed(1)}</strong>}{vulnerability.known_exploited && <span>Known exploited</span>}</div>)}</div> : <p className="muted">No NVD CVE matched this exact CPE version.</p>}
+                          {item.top_vulnerabilities.length ? <div className="report-cve-list">{item.top_vulnerabilities.slice(0, 3).map((vulnerability) => <div key={vulnerability.cve_id}><a href={`https://nvd.nist.gov/vuln/detail/${vulnerability.cve_id}`} target="_blank" rel="noreferrer">{vulnerability.cve_id}<ExternalLink size={11} /></a><Status value={vulnerability.severity} />{vulnerability.cvss_score != null && <strong>CVSS {vulnerability.cvss_score.toFixed(1)}</strong>}{vulnerability.known_exploited && <span>Known exploited</span>}</div>)}</div> : <p className="muted">NVD returned no matches for this observed CPE; verify the device separately.</p>}
                         </>
                       )}
                     </article>
@@ -408,7 +492,7 @@ export function ScanReportPage({ scanId }: { scanId: string }) {
             <ReportStat label="Queued" value={String(scan.queued)} detail="Waiting" />
             <ReportStat label="Running" value={String(scan.running)} detail="Active" />
             <ReportStat label="Completed" value={String(scan.completed)} detail="Finished" />
-            <ReportStat label="Failed" value={String(scan.failed)} detail="Errors" />
+            <ReportStat label="Failed" value={String(scan.failed)} detail={`${timedOutHosts} timed out, ${failedHosts} errors`} />
             <ReportStat label="Cancelled" value={String(scan.cancelled)} detail="Stopped" />
           </div>
         </section>
@@ -419,13 +503,16 @@ export function ScanReportPage({ scanId }: { scanId: string }) {
             {scan.results.map((result) => (
               <article className="report-host-card" key={result.device_id}>
                 <div className="report-host-heading"><span className="device-icon"><HardDrive size={15} /></span><div><strong>{result.hostname ?? result.ip}</strong><small>{result.ip}</small></div><Status value={result.status} /></div>
+                {result.hostname && <small className="scan-evidence-reference">Hostname source: {hostnameSourceLabel(result.hostname_source)}</small>}
+                {result.raw_xml_sha256 && <small className="scan-evidence-reference">Raw Nmap XML SHA-256: <code className="scan-evidence-hash">{result.raw_xml_sha256}</code></small>}
                 <div className="report-host-metrics">
                   <div><span>Type</span><strong>{result.device_type ? titleCase(result.device_type) : "Not classified"}</strong></div>
-                  <div><span>Ports</span><strong>{result.ports.length}</strong></div>
-                  <div><span>OS evidence</span><strong>{result.os_matches.length}</strong></div>
+                  <div><span>Confirmed open</span><strong>{["partial", "timed_out", "failed", "cancelled"].includes(result.status) && !result.ports.length ? "Unknown" : countPortStates(result.ports).open}</strong></div>
+                  <div><span>OS estimate</span><strong title={result.os_matches[0] ? "Nmap match score, not a confirmed operating system" : undefined}>{result.os_matches[0] ? `${result.os_matches[0].name} (${result.os_matches[0].accuracy}% match)` : "Not identified"}</strong></div>
                   <div><span>Findings</span><strong>{result.exposure_flags.length}</strong></div>
                 </div>
-                {result.ports.length > 0 && <div className="report-port-list">{result.ports.slice(0, 12).map((port) => <code key={`${result.device_id}-${port.protocol}-${port.port}`}>{port.port}/{port.protocol} {portEvidenceLabel(port)}</code>)}{result.ports.length > 12 && <span>+{result.ports.length - 12} more</span>}</div>}
+                {result.ports.length > 0 && <PortEvidenceTable ports={result.ports} />}
+                {!result.ports.length && <p className="muted">No port-state evidence was returned. This does not establish that the ports are closed.</p>}
                 {result.exposure_flags.length > 0 && <div className="report-finding-list">{result.exposure_flags.map((flag) => <div key={`${result.device_id}-${flag.code}`}><Status value={flag.severity} /><strong>{flag.title}</strong><span>{flag.evidence}</span></div>)}</div>}
                 {result.error && <div className="inline-error"><ShieldAlert size={15} /><span>{result.error}</span></div>}
               </article>

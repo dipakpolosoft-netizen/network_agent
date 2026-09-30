@@ -175,6 +175,16 @@ class AuthService:
             return None
         if parse_timestamp(session["expires_at"]) <= utc_now():
             self.store.delete("sessions", token_hash)
+            record_activity(
+                self.store,
+                event_type="user.session_expired",
+                message="Operator session expired",
+                actor_type="user",
+                actor_id=session["user_id"],
+                resource_type="user",
+                resource_id=session["user_id"],
+                severity="warning",
+            )
             return None
         user = self.store.read("users", session["user_id"])
         if not user or not user["active"]:

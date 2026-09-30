@@ -66,6 +66,15 @@ export type Discovery = {
   discovery_id: string;
   command_id: string;
   agent_id: string;
+  site_id: string | null;
+  change_summary: {
+    baseline_discovery_id: string | null;
+    baseline_completed_at: string | null;
+    new_host_count: number;
+    not_observed_count: number;
+    new_hosts: Array<{ device_id: string; ip: string; hostname: string | null }>;
+    not_observed_hosts: Array<{ device_id: string; ip: string; hostname: string | null }>;
+  };
   status: string;
   stage: string;
   network: string | null;
@@ -97,12 +106,23 @@ export type Discovery = {
   current_scope: string | null;
   total_scopes: number;
   public_scope_authorized: boolean;
+  known_targets: string[];
+  follow_up_checks: Array<{
+    ip: string;
+    status: "already_discovered" | "responsive" | "no_response" | "error";
+    method: "initial_discovery" | "targeted_tcp_icmp";
+    checked_at: string;
+    reason: string | null;
+    error: string | null;
+  }>;
 };
 
 export type PortResult = {
   protocol: "tcp" | "udp";
   port: number;
   state: string;
+  evidence_source?: "nmap" | null;
+  recorded_at?: string | null;
   reason: string | null;
   service: string | null;
   product: string | null;
@@ -141,6 +161,9 @@ export type Asset = {
   last_discovery_id: string | null;
   last_scan_id: string | null;
   last_scan_status: string | null;
+  port_snapshot_scan_id: string | null;
+  port_snapshot_at: string | null;
+  port_snapshot_ip: string | null;
   observation_count: number;
   scan_count: number;
   created_at: string;
@@ -162,6 +185,14 @@ export type AssetObservation = {
   device_type: string | null;
   status: string;
   open_port_count: number | null;
+  scan_profile: string | null;
+  port_delta: {
+    baseline_scan_id: string;
+    opened_count: number;
+    no_longer_confirmed_count: number;
+    opened_ports: Array<{ protocol: "tcp" | "udp"; port: number; service: string | null }>;
+    no_longer_confirmed_ports: Array<{ protocol: "tcp" | "udp"; port: number; service: string | null }>;
+  } | null;
 };
 
 export type AssetDeviceProfile = {
@@ -195,6 +226,7 @@ export type AssetDeviceProfile = {
 export type AssetEvidence = {
   asset_id: string;
   items: Array<{
+    review_id: string;
     source: "host_scan" | "nvd" | "nuclei" | "greenbone";
     classification: "exposure_signal" | "potential_cve" | "configuration_observation" | "scanner_finding";
     source_id: string;
@@ -206,6 +238,10 @@ export type AssetEvidence = {
     detail: string;
     reference: string | null;
     target: string | null;
+    review_status: "unreviewed" | "investigating" | "confirmed" | "false_positive" | "accepted_risk";
+    review_note: string | null;
+    reviewed_at: string | null;
+    reviewed_by: string | null;
   }>;
   runs: Array<{
     job_id: string;
@@ -247,9 +283,11 @@ export type TopologyLink = {
   source: string;
   target: string;
   reported_by: string;
+  probe_id: string;
   local_port: string;
   remote_port: string | null;
   remote_system_name: string | null;
+  match_method: "chassis_id" | "mac" | "unresolved";
   discovery_id: string;
   observed_at: string;
   stale: boolean;
@@ -259,6 +297,16 @@ export type TopologyGraph = {
   site_id: string;
   nodes: TopologyNode[];
   links: TopologyLink[];
+  probes?: Array<{
+    agent_id: string;
+    label: string;
+    hostname: string;
+    ip: string | null;
+    subnet: string | null;
+    os_name: string;
+    agent_version: string;
+    last_heartbeat_at: string | null;
+  }>;
   observed_assets: number;
   unlinked_assets: number;
   stale_hidden: number;
@@ -342,7 +390,10 @@ export type HostResult = {
   device_id: string;
   ip: string;
   status: string;
+  started_at?: string | null;
+  completed_at?: string | null;
   hostname: string | null;
+  hostname_source?: "nmap" | "discovery" | "snmp" | null;
   device_type: string | null;
   classification_confidence: number | null;
   ports: PortResult[];
@@ -354,6 +405,7 @@ export type HostResult = {
     evidence: string;
   }>;
   error: string | null;
+  raw_xml_sha256?: string | null;
 };
 
 export type CountItem = {
@@ -368,7 +420,11 @@ export type ScanSummary = {
   network_devices: number;
   servers: number;
   workstations: number;
+  timed_out_hosts?: number;
+  failed_hosts?: number;
   open_ports: number;
+  open_filtered_ports?: number;
+  filtered_ports?: number;
   tcp_ports: number;
   udp_ports: number;
   service_fingerprints: number;
@@ -419,12 +475,14 @@ export type ScanChangeSummary = {
   missing_host_count: number;
   opened_port_count: number;
   closed_port_count: number;
+  no_longer_confirmed_port_count?: number;
   new_finding_count: number;
   resolved_finding_count: number;
   new_hosts: ChangedHost[];
   missing_hosts: ChangedHost[];
   opened_ports: ChangedPort[];
   closed_ports: ChangedPort[];
+  no_longer_confirmed_ports?: ChangedPort[];
   new_findings: ChangedFinding[];
   resolved_findings: ChangedFinding[];
 };
@@ -464,6 +522,7 @@ export type VulnerabilityLookup = {
   normalized_cpe: string;
   total: number;
   returned: number;
+  truncated: boolean;
   retrieved_at: string;
   cached: boolean;
   vulnerabilities: VulnerabilityMatch[];
@@ -496,6 +555,9 @@ export type CpeVulnerabilitySummary = {
   affected_service_count: number;
   total: number;
   returned: number;
+  truncated: boolean;
+  retrieved_at: string | null;
+  cached: boolean;
   severity_counts: VulnerabilitySeverityCounts;
   highest_severity: "critical" | "high" | "medium" | "low" | "unknown" | null;
   known_exploited: number;
@@ -520,6 +582,7 @@ export type ScanVulnerabilitySummary = {
   evidence_current: boolean;
   failed_cpes: number;
   cached_lookups: number;
+  partial_cpes: number;
 };
 
 export type AgentDiagnosticType =
@@ -552,12 +615,41 @@ export type AgentDiagnostic = {
 
 export type ScanProfile = "inventory" | "network_services" | "standard" | "full_tcp";
 
+export type ScanProfilePlan = {
+  tcp_top_ports: number | null;
+  tcp_all_ports: boolean;
+  tcp_ports: number[];
+  udp_ports: number[];
+  version_detection: "light" | "full";
+  os_detection: "when_privileged" | "not_requested";
+  host_timeout_seconds: number;
+  assume_host_up: boolean;
+  open_only_output: boolean;
+};
+
+export type ScanOrigin = {
+  agent_id: string;
+  label: string;
+  hostname: string;
+  local_ip: string | null;
+  subnet: string | null;
+  site_name: string | null;
+  os_name: string;
+  agent_version: string;
+  discovery_interface: string | null;
+  last_heartbeat_at: string | null;
+  source: "scan_snapshot" | "current_heartbeat";
+};
+
 export type Scan = {
   scan_id: string;
   command_id: string;
   discovery_id: string;
   agent_id: string;
+  site_id: string | null;
+  scan_origin: ScanOrigin | null;
   profile: ScanProfile;
+  profile_plan: ScanProfilePlan | null;
   status: string;
   total: number;
   queued: number;
@@ -567,6 +659,7 @@ export type Scan = {
   cancelled: number;
   cancel_requested: boolean;
   stage: string | null;
+  last_progress_at: string | null;
   targets: Array<{
     device_id: string;
     ip: string;
@@ -615,7 +708,29 @@ export type ApprovedScope = {
   description: string | null;
   exclusions: string[];
   scan_profiles: ScanProfile[];
+  owner: string | null;
+  approval_reference: string | null;
+  approved_by: string | null;
+  expires_on: string | null;
+  authorization_confirmed: boolean;
+  public_range_authorized: boolean;
+  approval_status: "active" | "expired" | "needs_review";
   created_at: string;
+  approved_at: string | null;
+};
+
+export type ScopeApproval = {
+  cidr: string;
+  label: string;
+  description: string;
+  exclusions: string[];
+  scan_profiles: ScanProfile[];
+  owner: string;
+  approval_reference: string;
+  approved_by: string;
+  expires_on: string;
+  authorization_confirmed: true;
+  public_range_authorized: boolean;
 };
 
 export type OperatorUser = {
@@ -692,7 +807,7 @@ export const api = {
   createSite: (name: string, owner: string, description: string) =>
     request<Site>("/api/sites", { method: "POST", body: JSON.stringify({ name, owner: owner || null, description: description || null }) }),
   siteScopes: (siteId: string) => request<ApprovedScope[]>(`/api/sites/${siteId}/scopes`),
-  approveScope: (siteId: string, scope: { cidr: string; label: string; description: string; exclusions: string[]; scan_profiles: ScanProfile[] }) =>
+  approveScope: (siteId: string, scope: ScopeApproval) =>
     request<ApprovedScope>(`/api/sites/${siteId}/scopes`, { method: "POST", body: JSON.stringify(scope) }),
   removeScope: (siteId: string, scopeId: string) =>
     request<void>(`/api/sites/${siteId}/scopes/${scopeId}`, { method: "DELETE" }),
@@ -708,6 +823,10 @@ export const api = {
     request<AssetObservation[]>(`/api/assets/${assetId}/observations?limit=50&offset=${offset}`),
   assetDeviceProfile: (assetId: string) => request<AssetDeviceProfile>(`/api/assets/${assetId}/device-profile`),
   assetEvidence: (assetId: string) => request<AssetEvidence>(`/api/assets/${assetId}/evidence`),
+  reviewAssetEvidence: (assetId: string, reviewId: string, status: AssetEvidence["items"][number]["review_status"], note: string) =>
+    request<AssetEvidence["items"][number]>(`/api/assets/${assetId}/evidence/${reviewId}/review`, {
+      method: "PATCH", body: JSON.stringify({ status, note }),
+    }),
   topology: (siteId: string, includeStale: boolean) =>
     request<TopologyGraph>(`/api/assets/topology?site_id=${encodeURIComponent(siteId)}&include_stale=${includeStale}`),
   scannerWorkers: () => request<ScannerWorker[]>("/api/workers"),
@@ -762,10 +881,11 @@ export const api = {
     agentId: string,
     scope: string | null,
     mode: "selected" | "all",
+    knownTargets: string[] = [],
   ) =>
     request(`/api/agents/${agentId}/discover`, {
       method: "POST",
-      body: JSON.stringify({ authorization_confirmed: true, scope, mode }),
+      body: JSON.stringify({ authorization_confirmed: true, scope, mode, known_targets: knownTargets }),
     }),
   cancelDiscovery: (discoveryId: string) =>
     request<Discovery>(`/api/discoveries/${discoveryId}/cancel`, {
@@ -775,6 +895,7 @@ export const api = {
     discoveryId: string,
     deviceIds: string[],
     profile: ScanProfile,
+    fullTcpConfirmed = false,
   ) =>
     request(`/api/discoveries/${discoveryId}/scan`, {
       method: "POST",
@@ -782,6 +903,7 @@ export const api = {
         device_ids: deviceIds,
         profile,
         authorization_confirmed: true,
+        full_tcp_confirmed: fullTcpConfirmed,
       }),
     }),
   cancelScan: (scanId: string) =>
@@ -797,12 +919,14 @@ export const api = {
     agentId: string,
     targetIp: string,
     diagnosticType: AgentDiagnosticType,
+    fullTcpConfirmed = false,
   ) =>
     request<AgentDiagnostic>(`/api/agents/${agentId}/diagnostics`, {
       method: "POST",
       body: JSON.stringify({
         target_ip: targetIp,
         diagnostic_type: diagnosticType,
+        full_tcp_confirmed: fullTcpConfirmed,
       }),
     }),
   diagnostic: (agentId: string, commandId: string) =>

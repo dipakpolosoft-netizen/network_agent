@@ -79,9 +79,20 @@ class EnrollmentService:
             raise EnrollmentNotFound
         if record["status"] == "consumed":
             raise EnrollmentConsumed
+        if record["status"] == "expired":
+            raise EnrollmentExpired
         if utc_now() >= parse_timestamp(record["expires_at"]):
             record["status"] = "expired"
             self.store.write("enrollments", token_hash, record)
+            record_activity(
+                self.store,
+                event_type="enrollment.expired",
+                message="Enrollment token expired",
+                resource_type="enrollment",
+                resource_id=record["enrollment_id"],
+                details={"site_id": record["site_id"]},
+                severity="warning",
+            )
             raise EnrollmentExpired
         return token_hash, record
 

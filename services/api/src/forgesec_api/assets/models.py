@@ -47,6 +47,9 @@ class AssetPublic(StrictModel):
     last_discovery_id: UUID | None
     last_scan_id: UUID | None
     last_scan_status: str | None
+    port_snapshot_scan_id: UUID | None = None
+    port_snapshot_at: datetime | None = None
+    port_snapshot_ip: str | None = None
     observation_count: int
     scan_count: int
     created_at: datetime
@@ -75,24 +78,54 @@ class TopologyLink(StrictModel):
     source: str
     target: str
     reported_by: UUID
+    probe_id: UUID
     local_port: str
     remote_port: str | None
     remote_system_name: str | None
+    match_method: Literal["chassis_id", "mac", "unresolved"]
     discovery_id: UUID
     observed_at: datetime
     stale: bool
+
+
+class TopologyProbe(StrictModel):
+    agent_id: UUID
+    label: str
+    hostname: str
+    ip: str | None
+    subnet: str | None
+    os_name: str
+    agent_version: str
+    last_heartbeat_at: datetime | None
 
 
 class TopologyGraph(StrictModel):
     site_id: UUID
     nodes: list[TopologyNode]
     links: list[TopologyLink]
+    probes: list[TopologyProbe] = Field(default_factory=list)
     observed_assets: int
     unlinked_assets: int
     stale_hidden: int
     total_links: int
     truncated: bool
     latest_observed_at: datetime | None
+
+
+class AssetPortChange(StrictModel):
+    protocol: Literal["tcp", "udp"]
+    port: int = Field(ge=1, le=65535)
+    service: str | None = None
+
+
+class AssetPortDelta(StrictModel):
+    baseline_scan_id: UUID
+    opened_count: int = Field(ge=0)
+    no_longer_confirmed_count: int = Field(ge=0)
+    opened_ports: list[AssetPortChange] = Field(default_factory=list, max_length=32)
+    no_longer_confirmed_ports: list[AssetPortChange] = Field(
+        default_factory=list, max_length=32
+    )
 
 
 class AssetObservation(StrictModel):
@@ -110,6 +143,8 @@ class AssetObservation(StrictModel):
     device_type: str | None
     status: str
     open_port_count: int | None
+    scan_profile: str | None = None
+    port_delta: AssetPortDelta | None = None
     vendor: str | None = None
     classification_confidence: float | None = Field(default=None, ge=0, le=1)
     discovery_reason: str | None = None
@@ -160,6 +195,7 @@ class AssetDeviceProfile(StrictModel):
 
 
 class AssetEvidenceItem(StrictModel):
+    review_id: str
     source: Literal["host_scan", "nvd", "nuclei", "greenbone"]
     classification: Literal[
         "exposure_signal",
@@ -176,6 +212,19 @@ class AssetEvidenceItem(StrictModel):
     detail: str
     reference: str | None = None
     target: str | None = None
+    review_status: Literal[
+        "unreviewed", "investigating", "confirmed", "false_positive", "accepted_risk"
+    ] = "unreviewed"
+    review_note: str | None = None
+    reviewed_at: datetime | None = None
+    reviewed_by: UUID | None = None
+
+
+class AssetEvidenceReviewPatch(StrictModel):
+    status: Literal[
+        "unreviewed", "investigating", "confirmed", "false_positive", "accepted_risk"
+    ]
+    note: str = Field(default="", max_length=1000)
 
 
 class AssetEvidenceRun(StrictModel):

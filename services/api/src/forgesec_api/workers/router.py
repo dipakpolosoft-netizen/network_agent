@@ -40,12 +40,15 @@ BearerCredentials = Annotated[HTTPAuthorizationCredentials | None, Depends(beare
 
 
 def authenticate_worker(
-    credentials: BearerCredentials, service: WorkerServiceDependency
+    credentials: BearerCredentials, service: WorkerServiceDependency,
+    request: Request,
 ) -> dict:
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Worker credential required")
     try:
-        return service.authenticate(credentials.credentials)
+        worker = service.authenticate(credentials.credentials)
+        request.state.worker_id = worker["worker_id"]
+        return worker
     except WorkerUnauthorized as exc:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, "Invalid worker credential"
@@ -180,6 +183,17 @@ def cancel_central_job(
 ) -> WorkerJobPublic:
     actor = getattr(request.state, "user", None)
     try:
+        if actor and actor["role"] != "admin":
+            try:
+                current = service.get_job(str(job_id))
+            except WorkerNotFound as exc:
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN, "Administrator access required"
+                ) from exc
+            if current.get("template_profile") != "http_baseline":
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN, "Administrator access required"
+                )
         job = service.cancel_job(
             str(job_id), actor_id=actor["user_id"] if actor else None
         )

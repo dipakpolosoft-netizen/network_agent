@@ -7,6 +7,7 @@ from typing import Any
 from forgesec_agent.enrollment import AgentIdentity, timestamp
 from forgesec_agent.heartbeat import HeartbeatSender
 from forgesec_agent.job_scheduler import ScanProtocolClient, ScanScheduler
+from forgesec_agent.scanning.nmap_runner import scan_profile_plan
 from forgesec_agent.scanning.policy import require_approved
 
 
@@ -24,11 +25,20 @@ class ScanCommandHandler:
         command_id = str(command["command_id"])
         payload = command["payload"]
         try:
+            if payload.get("profile_plan") != scan_profile_plan(
+                str(payload["profile"])
+            ):
+                raise ValueError("Probe scan profile differs from the requested plan")
             require_approved(
                 payload.get("scope_policy"),
                 [str(target["ip"]) for target in payload["targets"]],
                 str(payload["profile"]),
             )
+            if payload["profile"] == "full_tcp":
+                if len(payload["targets"]) != 1:
+                    raise ValueError("Full TCP is limited to one selected target")
+                if payload.get("full_tcp_confirmed") is not True:
+                    raise ValueError("Full TCP escalation was not confirmed")
         except (ValueError, KeyError, TypeError) as exc:
             self._event(client, identity, command_id, "failed", str(exc)[:1024])
             return

@@ -32,6 +32,7 @@ class VulnerabilityLookup(StrictModel):
     normalized_cpe: str
     total: int = Field(ge=0)
     returned: int = Field(ge=0)
+    truncated: bool = False
     retrieved_at: datetime
     cached: bool
     vulnerabilities: list[VulnerabilityMatch] = Field(max_length=500)
@@ -67,6 +68,9 @@ class CpeVulnerabilitySummary(StrictModel):
     affected_service_count: int = Field(ge=0)
     total: int = Field(default=0, ge=0)
     returned: int = Field(default=0, ge=0)
+    truncated: bool = False
+    retrieved_at: datetime | None = None
+    cached: bool = False
     severity_counts: VulnerabilitySeverityCounts = Field(
         default_factory=VulnerabilitySeverityCounts
     )
@@ -94,6 +98,7 @@ class ScanVulnerabilitySummary(StrictModel):
     evidence_current: bool
     failed_cpes: int = Field(ge=0)
     cached_lookups: int = Field(ge=0)
+    partial_cpes: int = Field(default=0, ge=0)
     notice: str = (
         "Potential matches based on detected CPEs, not confirmed exploitation. "
         "Verify the product version and vendor advisory before remediation."

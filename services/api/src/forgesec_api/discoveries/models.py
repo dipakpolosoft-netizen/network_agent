@@ -15,6 +15,7 @@ class DiscoveryCreateRequest(StrictModel):
     authorization_confirmed: Literal[True]
     scope: str | None = None
     mode: Literal["selected", "all"] = "selected"
+    known_targets: list[str] = Field(default_factory=list, max_length=3)
 
 
 class DiscoveryCreateResponse(StrictModel):
@@ -89,6 +90,15 @@ class DiscoveredDevice(StrictModel):
     discovery_scope: str | None = None
 
 
+class DiscoveryFollowUp(StrictModel):
+    ip: str
+    status: Literal["already_discovered", "responsive", "no_response", "error"]
+    method: Literal["initial_discovery", "targeted_tcp_icmp"]
+    checked_at: datetime
+    reason: str | None = Field(default=None, max_length=128)
+    error: str | None = Field(default=None, max_length=512)
+
+
 class DiscoveryResult(StrictModel):
     schema_version: Literal["1.0"]
     message_type: Literal["discovery.result"]
@@ -104,12 +114,36 @@ class DiscoveryResult(StrictModel):
     requested_scopes: list[str] = Field(default_factory=list, max_length=256)
     completed_scopes: list[str] = Field(default_factory=list, max_length=256)
     failed_scopes: list[str] = Field(default_factory=list, max_length=256)
+    follow_up_checks: list[DiscoveryFollowUp] = Field(
+        default_factory=list, max_length=3
+    )
+
+
+class DiscoveryHostChange(StrictModel):
+    device_id: str
+    ip: str
+    hostname: str | None = None
+
+
+class DiscoveryChangeSummary(StrictModel):
+    baseline_discovery_id: UUID | None = None
+    baseline_completed_at: datetime | None = None
+    new_host_count: int = Field(default=0, ge=0)
+    not_observed_count: int = Field(default=0, ge=0)
+    new_hosts: list[DiscoveryHostChange] = Field(default_factory=list, max_length=128)
+    not_observed_hosts: list[DiscoveryHostChange] = Field(
+        default_factory=list, max_length=128
+    )
 
 
 class DiscoveryPublic(StrictModel):
     discovery_id: UUID
     command_id: UUID
     agent_id: UUID
+    site_id: UUID | None = None
+    change_summary: DiscoveryChangeSummary = Field(
+        default_factory=DiscoveryChangeSummary
+    )
     status: str
     stage: str
     network: str | None
@@ -133,3 +167,5 @@ class DiscoveryPublic(StrictModel):
     current_scope: str | None = None
     total_scopes: int = Field(default=1, ge=1, le=256)
     public_scope_authorized: bool = False
+    known_targets: list[str] = Field(default_factory=list)
+    follow_up_checks: list[DiscoveryFollowUp] = Field(default_factory=list)

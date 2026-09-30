@@ -8,6 +8,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
+from forgesec_agent import __version__
 from forgesec_agent.config import validate_server_url
 
 
@@ -160,7 +161,7 @@ class ForgeSecApiClient:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "ForgeSec-Network-Agent/0.1.0",
+            "User-Agent": f"ForgeSec-Network-Agent/{__version__}",
         }
         if credential:
             headers["Authorization"] = f"Bearer {credential}"

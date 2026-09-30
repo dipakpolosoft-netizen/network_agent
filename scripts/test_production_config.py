@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import copy
+import io
+import tempfile
 import unittest
+from contextlib import redirect_stderr
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from check_production_config import validate
+from check_production_config import main, validate
 
 
 class ProductionConfigTests(unittest.TestCase):
@@ -110,6 +116,26 @@ class ProductionConfigTests(unittest.TestCase):
         issues = validate(config)
         self.assertTrue(any("DATABASE_URL" in issue for issue in issues))
         self.assertTrue(any("AGENT_SERVER_URL" in issue for issue in issues))
+
+    def test_compose_failure_reports_setting_names_without_secret_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = Path(directory) / ".env"
+            env_file.write_text("", encoding="utf-8")
+            stderr = io.StringIO()
+            with (
+                patch("sys.argv", ["check_production_config.py", "--env-file", str(env_file)]),
+                patch(
+                    "check_production_config.subprocess.run",
+                    return_value=SimpleNamespace(
+                        returncode=1,
+                        stderr="FORGESEC_DATABASE_URL is unset; secret-value-123",
+                    ),
+                ),
+                redirect_stderr(stderr),
+            ):
+                self.assertEqual(main(), 2)
+            self.assertIn("FORGESEC_DATABASE_URL", stderr.getvalue())
+            self.assertNotIn("secret-value-123", stderr.getvalue())
 
 
 if __name__ == "__main__":

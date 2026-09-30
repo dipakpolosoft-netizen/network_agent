@@ -30,7 +30,7 @@ def evaluate(discovery: dict, scan: dict, plan: dict | None = None) -> list[Find
     if not isinstance(discovery, dict) or not isinstance(scan, dict):
         return [Finding("FAIL", "Discovery and scan must be JSON objects")]
     if plan is not None:
-        for error in validate_plan(plan):
+        for error in validate_plan(plan, mode="accuracy"):
             fail(f"Pilot plan: {error}")
         if not isinstance(plan, dict) or any(item.level == "FAIL" for item in findings):
             return findings
@@ -124,20 +124,94 @@ def evaluate(discovery: dict, scan: dict, plan: dict | None = None) -> list[Find
         if any(result.get("status") != "completed" for result in results):
             fail("Completed scan contains a non-completed host result")
 
+    summary = scan.get("summary")
+    if not isinstance(summary, dict):
+        fail("Scan summary is missing; use a report from the updated API")
+    else:
+        port_counts = {
+            "open_ports": 0,
+            "open_filtered_ports": 0,
+            "filtered_ports": 0,
+            "tcp_ports": 0,
+            "udp_ports": 0,
+        }
+        for result in results:
+            for port in result.get("ports") or []:
+                if not isinstance(port, dict):
+                    continue
+                state = port.get("state")
+                if state == "open":
+                    port_counts["open_ports"] += 1
+                    if port.get("protocol") == "tcp":
+                        port_counts["tcp_ports"] += 1
+                    elif port.get("protocol") == "udp":
+                        port_counts["udp_ports"] += 1
+                elif state == "open|filtered":
+                    port_counts["open_filtered_ports"] += 1
+                elif state == "filtered":
+                    port_counts["filtered_ports"] += 1
+        for key, expected_count in port_counts.items():
+            if summary.get(key) != expected_count:
+                fail(f"Scan summary {key} does not match saved port states")
+
     if plan is None:
         return findings
 
     scope = plan["approval"]["discovery_cidr"]
+    if discovery.get("authorization_confirmed") is not True:
+        fail("Discovery does not record operator authorization")
+    if not ipaddress.ip_network(scope).is_private and discovery.get("public_scope_authorized") is not True:
+        fail("Discovery does not record public-range authorization")
     if discovery.get("mode") != "selected" or discovery.get("network") != scope:
         fail("Discovery is not the single approved pilot segment")
-    if discovery.get("requested_scopes") != [scope] or scope not in discovery.get("completed_scopes", []):
+    if discovery.get("requested_scopes") != [scope] or discovery.get("completed_scopes") != [scope]:
         fail("Requested/completed discovery scopes do not match the pilot segment")
+    if discovery.get("failed_scopes"):
+        fail("Discovery reports failed scopes")
+    if discovery.get("total_scopes") not in (None, 1):
+        fail("Discovery attempted more than one scope")
+    if discovery.get("site_id") and scan.get("site_id") and discovery["site_id"] != scan["site_id"]:
+        fail("Discovery and scan site IDs differ")
     if scan.get("profile") not in plan["approval"]["profiles"]:
         fail("Scan profile is not in the pilot approval")
+    expected_top_ports = {"inventory": 200, "standard": 1000}.get(scan.get("profile"))
+    profile_plan = scan.get("profile_plan")
+    if not isinstance(profile_plan, dict) or (
+        profile_plan.get("tcp_top_ports") != expected_top_ports
+        or profile_plan.get("tcp_all_ports") is not False
+        or profile_plan.get("udp_ports") != []
+        or profile_plan.get("open_only_output") is not True
+    ):
+        fail("Saved scan port plan does not match the first-pilot profile")
     if len(targets) != 1:
         fail("First pilot scan must select exactly one known target")
 
     expected = {item["ipv4"]: item for item in plan["known_devices"]}
+    known_targets = discovery.get("known_targets") or []
+    if len(known_targets) != len(expected) or set(known_targets) != set(expected):
+        fail("Known-host checks do not cover the pilot baseline IPs")
+    checks = discovery.get("follow_up_checks") or []
+    checks_by_ip = {item.get("ip"): item for item in checks if isinstance(item, dict)}
+    if len(checks_by_ip) != len(checks):
+        fail("Known-host checks contain duplicate or invalid entries")
+    if set(checks_by_ip) != set(expected):
+        fail("Saved known-host results do not match the pilot baseline IPs")
+    for ip in expected:
+        check = checks_by_ip.get(ip)
+        if not check:
+            fail(f"Known host {ip} has no saved check result")
+        elif check.get("status") == "responsive":
+            review(f"Initial discovery missed {ip}; targeted check recovered it")
+        elif check.get("status") == "error":
+            fail(f"Known-host check failed for {ip}")
+        elif check.get("status") == "no_response":
+            review(f"Known host {ip} gave no response; this is not proof it is offline")
+        elif check.get("status") != "already_discovered":
+            fail(f"Known host {ip} has an unrecognized check status")
+    if len(targets) == 1:
+        target_baseline = expected.get(targets[0].get("ip"))
+        if target_baseline and not target_baseline["expected_tcp_ports"]:
+            fail("Selected pilot target needs a known expected open TCP port")
     by_ip = {item.get("ip"): item for item in devices}
     for ip, baseline in expected.items():
         observed = by_ip.get(ip)
@@ -165,6 +239,8 @@ def evaluate(discovery: dict, scan: dict, plan: dict | None = None) -> list[Find
             for port in result.get("ports", [])
             if isinstance(port, dict) and port.get("protocol") == "tcp" and port.get("state") == "open"
         }
+        if any(port.get("protocol") == "udp" for port in result.get("ports", []) if isinstance(port, dict)):
+            fail(f"First-pilot {scan.get('profile')} scan unexpectedly includes UDP evidence on {ip}")
         for port in expected[ip]["expected_tcp_ports"]:
             if port not in observed_ports:
                 fail(f"Expected open TCP port {port} was not observed on {ip}; check profile and firewall")
@@ -188,6 +264,13 @@ def main() -> int:
         return 2
     findings = evaluate(discovery, scan, plan)
     print(f"Discovery {discovery.get('status')}: {len(discovery.get('devices', []))} devices")
+    if discovery.get("known_targets"):
+        checks = discovery.get("follow_up_checks") or []
+        outcomes = ", ".join(
+            f"{item.get('ip')}: {item.get('status')}"
+            for item in checks if isinstance(item, dict)
+        )
+        print(f"Known-host checks: {outcomes or 'none reported'}")
     print(f"Scan {scan.get('status')}: {len(scan.get('results', []))} results")
     for finding in findings:
         print(f"{finding.level}: {finding.message}")

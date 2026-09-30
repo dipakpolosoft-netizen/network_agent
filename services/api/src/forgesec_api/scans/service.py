@@ -11,6 +11,7 @@ from forgesec_api.assets.service import AssetService
 from forgesec_api.commands.service import CommandNotFound, CommandService
 from forgesec_api.discoveries.service import DiscoveryNotFound, DiscoveryService
 from forgesec_api.scans.models import HostScanResult, ScanProgress
+from forgesec_api.scans.profiles import profile_plan
 from forgesec_api.settings import Settings
 from forgesec_api.sites.service import SiteService
 from forgesec_api.storage import JsonStore
@@ -58,6 +59,22 @@ MANAGEMENT_PORTS = {
 MAX_CHANGE_ITEMS = 128
 
 
+def _scan_origin(agent: dict, source: str) -> dict:
+    return {
+        "agent_id": agent["agent_id"],
+        "label": agent["label"],
+        "hostname": agent["hostname"],
+        "local_ip": agent.get("local_ip"),
+        "subnet": agent.get("subnet"),
+        "site_name": agent.get("site_name"),
+        "os_name": agent["os_name"],
+        "agent_version": agent["agent_version"],
+        "discovery_interface": agent.get("discovery_interface"),
+        "last_heartbeat_at": agent.get("last_heartbeat_at"),
+        "source": source,
+    }
+
+
 class ScanService:
     def __init__(
         self,
@@ -83,6 +100,7 @@ class ScanService:
         discovery_id: str,
         device_ids: list[str],
         profile: str,
+        full_tcp_confirmed: bool = False,
     ) -> dict:
         if len(device_ids) != len(set(device_ids)):
             raise InvalidScanSelection("Each selected device must be unique")
@@ -90,6 +108,13 @@ class ScanService:
             raise InvalidScanSelection(
                 f"Select between 1 and {self.settings.max_scan_targets} devices"
             )
+        if profile == "full_tcp":
+            if len(device_ids) != 1:
+                raise InvalidScanSelection("Full TCP is limited to one selected target")
+            if not full_tcp_confirmed:
+                raise InvalidScanSelection(
+                    "Confirm the Full TCP escalation before starting"
+                )
         try:
             discovery = self.discoveries.get(discovery_id)
         except DiscoveryNotFound as exc:
@@ -128,6 +153,13 @@ class ScanService:
                 }
             )
         agent = self.agents.get_public(discovery["agent_id"])
+        if not discovery.get("site_id") or discovery["site_id"] != agent.get(
+            "site_id"
+        ):
+            raise InvalidScanSelection(
+                "Discovery site differs from the probe's current site; "
+                "run discovery again"
+            )
         if agent["status"] == "offline":
             raise InvalidScanSelection("Agent is offline")
         if not all(
@@ -137,77 +169,101 @@ class ScanService:
             raise InvalidScanSelection(
                 "Selected targets or scan profile are outside the site's approved scope"
             )
-        scan_id = str(uuid4())
-        command = self.commands.create(
-            agent_id=discovery["agent_id"],
-            command_type="scan_devices",
-            payload={
+        requested_plan = profile_plan(profile)
+        with self.store.locked():
+            for existing in self.store.list("scans"):
+                if existing["agent_id"] != discovery["agent_id"]:
+                    continue
+                if self._reconcile(existing)["status"] in {
+                    "queued", "running", "cancelling"
+                }:
+                    raise InvalidScanSelection(
+                        "A scan is already active for this probe. Wait for it to "
+                        "finish or cancel it before starting another."
+                    )
+            scan_id = str(uuid4())
+            command = self.commands.create(
+                agent_id=discovery["agent_id"],
+                command_type="scan_devices",
+                payload={
+                    "scan_id": scan_id,
+                    "discovery_id": discovery_id,
+                    "profile": profile,
+                    "profile_plan": requested_plan,
+                    "full_tcp_confirmed": full_tcp_confirmed,
+                    "concurrency": self.settings.scan_concurrency,
+                    "scope_policy": self.sites.policy(agent.get("site_id")),
+                    "targets": [
+                        {
+                            "device_id": target["device_id"],
+                            "ip": target["ip"],
+                            "hostname": target.get("hostname"),
+                            "vendor": target.get("vendor"),
+                            "snmp_name": target.get("snmp_name"),
+                            "snmp_description": target.get("snmp_description"),
+                            "snmp_object_id": target.get("snmp_object_id"),
+                            "snmp_contact": target.get("snmp_contact"),
+                            "snmp_location": target.get("snmp_location"),
+                            "snmp_uptime_seconds": target.get("snmp_uptime_seconds"),
+                            "snmp_interface_count": target.get("snmp_interface_count"),
+                            "snmp_interfaces": target.get("snmp_interfaces") or [],
+                            "device_type": target.get("device_type"),
+                            "classification_confidence": target.get(
+                                "classification_confidence"
+                            ),
+                        }
+                        for target in targets
+                    ],
+                },
+            )
+            now = isoformat(utc_now())
+            record = {
                 "scan_id": scan_id,
+                "command_id": command["command_id"],
                 "discovery_id": discovery_id,
+                "agent_id": discovery["agent_id"],
+                "site_id": discovery["site_id"],
+                "scan_origin": _scan_origin(agent, "scan_snapshot"),
                 "profile": profile,
-                "concurrency": self.settings.scan_concurrency,
-                "scope_policy": self.sites.policy(agent.get("site_id")),
-                "targets": [
-                    {
-                        "device_id": target["device_id"],
-                        "ip": target["ip"],
-                        "hostname": target.get("hostname"),
-                        "vendor": target.get("vendor"),
-                        "snmp_name": target.get("snmp_name"),
-                        "snmp_description": target.get("snmp_description"),
-                        "snmp_object_id": target.get("snmp_object_id"),
-                        "snmp_contact": target.get("snmp_contact"),
-                        "snmp_location": target.get("snmp_location"),
-                        "snmp_uptime_seconds": target.get("snmp_uptime_seconds"),
-                        "snmp_interface_count": target.get("snmp_interface_count"),
-                        "snmp_interfaces": target.get("snmp_interfaces") or [],
-                        "device_type": target.get("device_type"),
-                        "classification_confidence": target.get(
-                            "classification_confidence"
-                        ),
-                    }
-                    for target in targets
-                ],
-            },
-        )
-        now = isoformat(utc_now())
-        record = {
-            "scan_id": scan_id,
-            "command_id": command["command_id"],
-            "discovery_id": discovery_id,
-            "agent_id": discovery["agent_id"],
-            "profile": profile,
-            "status": "queued",
-            "total": len(targets),
-            "queued": len(targets),
-            "running": 0,
-            "completed": 0,
-            "failed": 0,
-            "cancelled": 0,
-            "cancel_requested": False,
-            "stage": "queued",
-            "targets": targets,
-            "results": [],
-            "created_at": now,
-            "started_at": None,
-            "completed_at": None,
-        }
-        record["summary"] = self._build_summary(record)
-        self.store.write("scans", scan_id, record)
-        record_activity(
-            self.store,
-            event_type="scan.queued",
-            message=f"Scan queued for {len(targets)} selected devices",
-            resource_type="scan",
-            resource_id=scan_id,
-            details={"profile": profile, "device_count": len(targets)},
-        )
-        return record
+                "profile_plan": requested_plan,
+                "status": "queued",
+                "total": len(targets),
+                "queued": len(targets),
+                "running": 0,
+                "completed": 0,
+                "failed": 0,
+                "cancelled": 0,
+                "cancel_requested": False,
+                "stage": "queued",
+                "last_progress_at": None,
+                "targets": targets,
+                "results": [],
+                "created_at": now,
+                "started_at": None,
+                "completed_at": None,
+            }
+            record["summary"] = self._build_summary(record)
+            self.store.write("scans", scan_id, record)
+            record_activity(
+                self.store,
+                event_type="scan.queued",
+                message=f"Scan queued for {len(targets)} selected devices",
+                resource_type="scan",
+                resource_id=scan_id,
+                details={
+                    "profile": profile,
+                    "device_count": len(targets),
+                    "full_tcp_confirmed": full_tcp_confirmed,
+                },
+            )
+            return record
 
     def save_progress(self, agent_id: str, progress: ScanProgress) -> dict:
         scan_id = str(progress.scan_id)
         with self.store.locked():
             record = self._owned(scan_id, agent_id)
+            if str(progress.agent_id) != agent_id:
+                raise InvalidScanSelection("Scan progress agent identity mismatch")
             if progress.total != record["total"]:
                 raise InvalidScanSelection("Progress total does not match scan")
             accounted = (
@@ -219,17 +275,73 @@ class ScanService:
             )
             if accounted != record["total"]:
                 raise InvalidScanSelection("Progress counts do not add up to total")
+            saved_completed = sum(
+                result["status"] == "completed" for result in record["results"]
+            )
+            if progress.completed < saved_completed:
+                raise InvalidScanSelection(
+                    "Progress cannot mark an uploaded completed host as failed"
+                )
+            running_ids = progress.running_device_ids
+            known_ids = {target["device_id"] for target in record["targets"]}
+            if (
+                len(running_ids) != len(set(running_ids))
+                or len(running_ids) > progress.running
+                or not set(running_ids) <= known_ids
+            ):
+                raise InvalidScanSelection("Running targets do not match this scan")
+            terminal = {"completed", "partial", "failed", "cancelled"}
+            if record["status"] in terminal:
+                if progress.status == record["status"] and all(
+                    getattr(progress, key) == record[key]
+                    for key in ("queued", "running", "completed", "failed", "cancelled")
+                ):
+                    return record
+                raise InvalidScanSelection("Scan already has a final outcome")
+            if progress.status in terminal:
+                if progress.queued or progress.running:
+                    raise InvalidScanSelection(
+                        "Final progress still has active targets"
+                    )
+                if progress.completed != saved_completed:
+                    raise InvalidScanSelection(
+                        "Final completed count needs uploaded host results"
+                    )
+                expected = self._outcome(
+                    progress.total,
+                    progress.completed,
+                    progress.failed,
+                    progress.cancelled,
+                )
+                if progress.status != expected:
+                    raise InvalidScanSelection(
+                        "Final status does not match target counts"
+                    )
+            elif any(
+                getattr(progress, key) < record[key]
+                for key in ("completed", "failed", "cancelled")
+            ):
+                raise InvalidScanSelection(
+                    "Progress cannot move completed targets backwards"
+                )
+            cancelling = record["cancel_requested"] and progress.status in {
+                "queued", "running"
+            }
             record.update(
                 {
-                    "status": progress.status,
-                    "stage": progress.stage,
+                    "status": "cancelling" if cancelling else progress.status,
+                    "stage": "cancelling" if cancelling else progress.stage,
                     "queued": progress.queued,
                     "running": progress.running,
                     "completed": progress.completed,
                     "failed": progress.failed,
                     "cancelled": progress.cancelled,
+                    "last_progress_at": isoformat(utc_now()),
                 }
             )
+            for target in record["targets"]:
+                if target["device_id"] in running_ids and target["status"] == "queued":
+                    target["status"] = "running"
             if progress.status == "running" and not record["started_at"]:
                 record["started_at"] = isoformat(progress.updated_at)
             if progress.status in {"completed", "partial", "failed", "cancelled"}:
@@ -247,7 +359,11 @@ class ScanService:
     ) -> dict:
         with self.store.locked():
             record = self._owned(scan_id, agent_id)
-            if str(result.scan_id) != scan_id or result.device_id != device_id:
+            if (
+                str(result.scan_id) != scan_id
+                or str(result.agent_id) != agent_id
+                or result.device_id != device_id
+            ):
                 raise InvalidScanSelection("Host result identity mismatch")
             target = next(
                 (item for item in record["targets"] if item["device_id"] == device_id),
@@ -255,8 +371,33 @@ class ScanService:
             )
             if target is None or target["ip"] != result.ip:
                 raise InvalidScanSelection("Host result is not a selected target")
-            target["status"] = result.status
+            agent = self.store.read("agents", agent_id)
+            if (
+                not agent
+                or not record.get("site_id")
+                or record["site_id"] != agent.get("site_id")
+                or not self.sites.approved(
+                    record["site_id"], target["ip"], record["profile"]
+                )
+            ):
+                raise InvalidScanSelection("Target is no longer approved for this site")
             serialized = result.model_dump(mode="json")
+            previous = next(
+                (
+                    item for item in record["results"]
+                    if item["device_id"] == device_id
+                ),
+                None,
+            )
+            if previous is not None:
+                if previous != serialized:
+                    raise InvalidScanSelection(
+                        "Conflicting host result for an already saved target"
+                    )
+                return record
+            if record["status"] in {"completed", "partial", "failed", "cancelled"}:
+                raise InvalidScanSelection("Scan already has a final outcome")
+            target["status"] = result.status
             record["results"] = [
                 item for item in record["results"] if item["device_id"] != device_id
             ]
@@ -284,9 +425,20 @@ class ScanService:
 
     def control(self, scan_id: str, agent_id: str) -> dict:
         record = self._owned(scan_id, agent_id)
+        agent = self.store.read("agents", agent_id)
+        site_id = record.get("site_id")
+        targets_allowed = bool(
+            agent
+            and site_id
+            and site_id == agent.get("site_id")
+            and all(
+                self.sites.approved(site_id, target["ip"], record["profile"])
+                for target in record["targets"]
+            )
+        )
         return {
             "scan_id": scan_id,
-            "cancel_requested": record["cancel_requested"],
+            "cancel_requested": record["cancel_requested"] or not targets_allowed,
         }
 
     def get(self, scan_id: str) -> dict:
@@ -364,20 +516,73 @@ class ScanService:
             except CommandNotFound:
                 return current
             if command["status"] == "cancelled":
-                return self._finish_from_command(current, "cancelled", "cancelled")
+                completed = sum(
+                    item["status"] == "completed" for item in current["targets"]
+                )
+                return self._finish_from_command(
+                    current,
+                    self._outcome(
+                        current["total"], completed, 0,
+                        current["total"] - completed,
+                    ),
+                    "cancelled",
+                )
             if command["status"] in {"expired", "failed"}:
                 stage = (
                     "command_expired"
                     if command["status"] == "expired"
                     else "command_failed"
                 )
-                return self._finish_from_command(current, "failed", stage)
+                completed = sum(
+                    item["status"] == "completed" for item in current["targets"]
+                )
+                cancelled = sum(
+                    item["status"] == "cancelled" for item in current["targets"]
+                )
+                outcome = self._outcome(
+                    current["total"],
+                    completed,
+                    current["total"] - completed - cancelled,
+                    cancelled,
+                )
+                return self._finish_from_command(
+                    current, outcome, stage
+                )
+            if command["status"] == "completed":
+                completed = sum(
+                    item["status"] == "completed" for item in current["targets"]
+                )
+                cancelled = sum(
+                    item["status"] == "cancelled" for item in current["targets"]
+                )
+                outcome = self._outcome(
+                    current["total"],
+                    completed,
+                    current["total"] - completed - cancelled,
+                    cancelled,
+                )
+                stage = (
+                    "command_completed"
+                    if outcome == "completed"
+                    else "progress_missing"
+                )
+                return self._finish_from_command(current, outcome, stage)
             return current
+
+    @staticmethod
+    def _outcome(total: int, completed: int, failed: int, cancelled: int) -> str:
+        if completed == total:
+            return "completed"
+        if cancelled == total:
+            return "cancelled"
+        if failed == total:
+            return "failed"
+        return "partial"
 
     def _finish_from_command(self, record: dict, status: str, stage: str) -> dict:
         for target in record["targets"]:
             if target["status"] in {"queued", "running"}:
-                target["status"] = status
+                target["status"] = "cancelled" if stage == "cancelled" else "failed"
         completed = sum(item["status"] == "completed" for item in record["targets"])
         cancelled = sum(item["status"] == "cancelled" for item in record["targets"])
         failed = record["total"] - completed - cancelled
@@ -389,7 +594,7 @@ class ScanService:
             completed=completed,
             failed=failed,
             cancelled=cancelled,
-            cancel_requested=record["cancel_requested"] or status == "cancelled",
+            cancel_requested=record["cancel_requested"] or stage == "cancelled",
             completed_at=record["completed_at"] or isoformat(utc_now()),
         )
         record["summary"] = self._build_summary(record)
@@ -410,9 +615,20 @@ class ScanService:
         record["summary"] = ScanService._build_summary(record)
         return record
 
-    @staticmethod
-    def _with_public_rollups(record: dict, records: list[dict]) -> dict:
+    def _with_public_rollups(self, record: dict, records: list[dict]) -> dict:
         record["summary"] = ScanService._build_summary(record)
+        if not record.get("scan_origin"):
+            agent_id = record.get("agent_id")
+            agent = self.store.read("agents", agent_id) if agent_id else None
+            if (
+                agent
+                and record.get("site_id")
+                and record["site_id"] == agent.get("site_id")
+                and agent.get("last_heartbeat_at")
+            ):
+                record["scan_origin"] = _scan_origin(
+                    self.agents.public(agent), "current_heartbeat"
+                )
         baseline = _previous_comparable_scan(record, records)
         record["change_summary"] = _build_change_summary(record, baseline)
         record["action_summary"] = _build_action_summary(record)
@@ -430,12 +646,16 @@ class ScanService:
         severity_counts: Counter[str] = Counter()
         unique_cpes: set[str] = set()
         open_ports = 0
+        open_filtered_ports = 0
+        filtered_ports = 0
         tcp_ports = 0
         udp_ports = 0
         service_fingerprints = 0
         management_services = 0
         snmp_device_ids: set[str] = set()
         evidence_hosts = 0
+        timed_out_hosts = 0
+        failed_hosts = 0
 
         for target in targets:
             device_type = _clean_label(target.get("device_type"))
@@ -448,6 +668,10 @@ class ScanService:
                 snmp_device_ids.add(target["device_id"])
 
         for result in results:
+            if result.get("status") == "timed_out":
+                timed_out_hosts += 1
+            elif result.get("status") == "failed":
+                failed_hosts += 1
             target = target_by_device.get(result.get("device_id"), {})
             ports = result.get("ports") or []
             os_matches = result.get("os_matches") or []
@@ -466,8 +690,13 @@ class ScanService:
                 protocol = str(port.get("protocol") or "").lower()
                 number = port.get("port")
                 state = str(port.get("state") or "").lower()
-                is_open = state in {"open", "open|filtered"}
-                if not is_open:
+                if state == "open|filtered":
+                    open_filtered_ports += 1
+                    continue
+                if state == "filtered":
+                    filtered_ports += 1
+                    continue
+                if state != "open":
                     continue
                 open_ports += 1
                 if protocol == "tcp":
@@ -510,7 +739,11 @@ class ScanService:
                 normalized_type_counts.get(device_type, 0)
                 for device_type in WORKSTATION_DEVICE_TYPES
             ),
+            "timed_out_hosts": timed_out_hosts,
+            "failed_hosts": failed_hosts,
             "open_ports": open_ports,
+            "open_filtered_ports": open_filtered_ports,
+            "filtered_ports": filtered_ports,
             "tcp_ports": tcp_ports,
             "udp_ports": udp_ports,
             "service_fingerprints": service_fingerprints,
@@ -598,48 +831,61 @@ def _top_counts(counter: Counter[str], *, limit: int) -> list[dict]:
 
 def _previous_comparable_scan(record: dict, records: list[dict]) -> dict | None:
     created_at = record.get("created_at")
-    if not created_at:
+    if not created_at or not record.get("site_id") or not _complete_scan(record):
         return None
+    target_signature = _target_signature(record)
     candidates = [
         item
         for item in records
         if item.get("scan_id") != record.get("scan_id")
+        and item.get("site_id") == record["site_id"]
         and item.get("agent_id") == record.get("agent_id")
         and item.get("profile") == record.get("profile")
-        and item.get("status") in {"completed", "partial"}
+        and item.get("profile_plan") == record.get("profile_plan")
+        and _target_signature(item) == target_signature
+        and _complete_scan(item)
         and item.get("created_at")
         and item.get("created_at") < created_at
-        and item.get("results")
     ]
     if not candidates:
         return None
     return max(candidates, key=lambda item: item["created_at"])
 
 
+def _target_signature(record: dict) -> set[tuple[str, str]]:
+    return {
+        (target["device_id"], target["ip"])
+        for target in record.get("targets") or []
+    }
+
+
+def _complete_scan(record: dict) -> bool:
+    targets = record.get("targets") or []
+    results = record.get("results") or []
+    return (
+        record.get("status") == "completed"
+        and bool(targets)
+        and len(results) == len(targets)
+        and {(item.get("device_id"), item.get("ip")) for item in results}
+        == _target_signature(record)
+        and all(item.get("status") == "completed" for item in results)
+    )
+
+
 def _build_change_summary(record: dict, baseline: dict | None) -> dict:
     if baseline is None:
         return _empty_change_summary()
 
-    current_hosts = _host_map(record)
-    baseline_hosts = _host_map(baseline)
     current_ports = _open_port_map(record)
     baseline_ports = _open_port_map(baseline)
     current_findings = _finding_map(record)
     baseline_findings = _finding_map(baseline)
 
-    new_host_ips = sorted(
-        set(current_hosts) - set(baseline_hosts),
-        key=_ip_sort_key,
-    )
-    missing_host_ips = sorted(
-        set(baseline_hosts) - set(current_hosts),
-        key=_ip_sort_key,
-    )
     opened_port_keys = sorted(
         set(current_ports) - set(baseline_ports),
         key=lambda item: (_ip_sort_key(item[0]), item[1], item[2]),
     )
-    closed_port_keys = sorted(
+    no_longer_confirmed_port_keys = sorted(
         set(baseline_ports) - set(current_ports),
         key=lambda item: (_ip_sort_key(item[0]), item[1], item[2]),
     )
@@ -656,21 +902,22 @@ def _build_change_summary(record: dict, baseline: dict | None) -> dict:
         "baseline_scan_id": baseline.get("scan_id"),
         "baseline_created_at": baseline.get("created_at"),
         "baseline_profile": baseline.get("profile"),
-        "new_host_count": len(new_host_ips),
-        "missing_host_count": len(missing_host_ips),
+        "new_host_count": 0,
+        "missing_host_count": 0,
         "opened_port_count": len(opened_port_keys),
-        "closed_port_count": len(closed_port_keys),
+        "closed_port_count": 0,
+        "no_longer_confirmed_port_count": len(no_longer_confirmed_port_keys),
         "new_finding_count": len(new_finding_keys),
         "resolved_finding_count": len(resolved_finding_keys),
-        "new_hosts": [current_hosts[ip] for ip in new_host_ips[:MAX_CHANGE_ITEMS]],
-        "missing_hosts": [
-            baseline_hosts[ip] for ip in missing_host_ips[:MAX_CHANGE_ITEMS]
-        ],
+        "new_hosts": [],
+        "missing_hosts": [],
         "opened_ports": [
             current_ports[key] for key in opened_port_keys[:MAX_CHANGE_ITEMS]
         ],
-        "closed_ports": [
-            baseline_ports[key] for key in closed_port_keys[:MAX_CHANGE_ITEMS]
+        "closed_ports": [],
+        "no_longer_confirmed_ports": [
+            baseline_ports[key]
+            for key in no_longer_confirmed_port_keys[:MAX_CHANGE_ITEMS]
         ],
         "new_findings": [
             current_findings[key] for key in new_finding_keys[:MAX_CHANGE_ITEMS]
@@ -690,12 +937,14 @@ def _empty_change_summary() -> dict:
         "missing_host_count": 0,
         "opened_port_count": 0,
         "closed_port_count": 0,
+        "no_longer_confirmed_port_count": 0,
         "new_finding_count": 0,
         "resolved_finding_count": 0,
         "new_hosts": [],
         "missing_hosts": [],
         "opened_ports": [],
         "closed_ports": [],
+        "no_longer_confirmed_ports": [],
         "new_findings": [],
         "resolved_findings": [],
     }
@@ -861,7 +1110,7 @@ def _open_port_map(record: dict) -> dict[tuple[str, str, int], dict]:
             state = str(port.get("state") or "").lower()
             protocol = str(port.get("protocol") or "").lower()
             number = port.get("port")
-            if state not in {"open", "open|filtered"}:
+            if state != "open":
                 continue
             if protocol not in {"tcp", "udp"} or not isinstance(number, int):
                 continue

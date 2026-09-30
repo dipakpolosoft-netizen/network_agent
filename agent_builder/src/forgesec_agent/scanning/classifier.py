@@ -10,121 +10,144 @@ def classify(
     os_matches: list[dict[str, Any]],
     identity: dict[str, Any] | None = None,
 ) -> tuple[str, float]:
-    open_ports = {item["port"] for item in ports if item["state"] == "open"}
-    service_names = {
-        str(item.get("service") or "").lower()
+    open_ports = {
+        (item.get("protocol", "tcp"), item["port"])
         for item in ports
-        if item.get("service")
+        if item.get("state") == "open"
     }
-    os_name = os_matches[0]["name"].lower() if os_matches else ""
-    evidence = _evidence_text(ports, os_matches, identity)
+    strong_evidence = _evidence_text(ports, os_matches, identity)
+    name_evidence = (
+        " ".join(
+            str(identity.get(key) or "") for key in ("hostname", "snmp_name")
+        ).lower()
+        if identity
+        else ""
+    )
 
+    roles = (
+        (
+            "firewall",
+            (
+                "fortigate",
+                "palo alto",
+                "pan-os",
+                "checkpoint",
+                "check point",
+                "sonicwall",
+                "watchguard",
+                "sophos firewall",
+                "pfsense",
+                "opnsense",
+                "firepower",
+                "firewall appliance",
+                "next-generation firewall",
+                "vpn gateway",
+            ),
+        ),
+        (
+            "switch",
+            (
+                "catalyst",
+                "procurve",
+                "arubaos-switch",
+                "ethernet switch",
+                "managed switch",
+                "switch",
+            ),
+        ),
+        (
+            "access-point",
+            (
+                "unifi ap",
+                "uap-",
+                "access point",
+                "wireless ap",
+                "wlan",
+                "aironet",
+                "ruckus",
+                "meraki mr",
+            ),
+        ),
+        (
+            "router",
+            (
+                "routeros",
+                "mikrotik",
+                "edgeos",
+                "openwrt",
+                "ios-xe",
+                "ios xr",
+                "router",
+            ),
+        ),
+        (
+            "voip-phone",
+            (
+                "voip",
+                "sip phone",
+                "ip phone",
+                "polycom",
+                "yealink",
+                "grandstream",
+            ),
+        ),
+        (
+            "printer",
+            (
+                "printer",
+                "laserjet",
+                "brother",
+                "canon",
+                "epson",
+                "xerox",
+                "jetdirect",
+            ),
+        ),
+        ("camera", ("webcam", "hikvision", "dahua", "ip camera", "nvr", "dvr")),
+        ("nas", ("synology", "qnap", "truenas", "freenas", "network attached storage")),
+    )
+    for role, markers in roles:
+        if _contains(strong_evidence, *markers):
+            return role, 0.9
+    for role, markers in roles:
+        if _contains(name_evidence, *markers):
+            return role, 0.65
+    if "firewall" in name_evidence:
+        return "firewall", 0.65
+
+    system_description = str((identity or {}).get("snmp_description") or "").lower()
+    best_os = (
+        str(os_matches[0].get("name") or "").lower()
+        if os_matches and os_matches[0].get("accuracy", 0) >= 85
+        else ""
+    )
     if _contains(
-        evidence,
-        "fortinet",
-        "fortigate",
-        "palo alto",
-        "pan-os",
-        "checkpoint",
-        "check point",
-        "sonicwall",
-        "watchguard",
-        "sophos firewall",
-        "pfsense",
-        "opnsense",
-        "firepower",
-        "firewall",
-        "vpn gateway",
-    ) or open_ports & {500, 4500}:
-        return "firewall", 0.9
-
+        system_description,
+        "poweredge",
+        "proliant",
+        "windows server",
+        "linux server",
+    ) or _contains(best_os, "windows server"):
+        return "server", 0.8
     if _contains(
-        evidence,
-        "catalyst",
-        "procurve",
-        "arubaos-switch",
-        "ethernet switch",
-        "managed switch",
-        "switch",
-    ):
-        return "switch", 0.9
+        system_description,
+        "workstation",
+        "desktop pc",
+        "windows 11",
+        "windows 10",
+        "macbook",
+    ) or _contains(best_os, "windows 11", "windows 10", "mac os"):
+        return "workstation", 0.75
 
-    if _contains(
-        evidence,
-        "unifi ap",
-        "uap-",
-        "access point",
-        "wireless ap",
-        "wlan",
-        "aironet",
-        "ruckus",
-        "meraki mr",
-    ):
-        return "access-point", 0.88
-
-    if _contains(
-        evidence,
-        "routeros",
-        "mikrotik",
-        "edgeos",
-        "openwrt",
-        "ios-xe",
-        "ios xr",
-        "router",
-        "gateway",
-    ) or "router" in os_name:
-        return "router", 0.88
-
-    if _contains(
-        evidence,
-        "voip",
-        "sip phone",
-        "ip phone",
-        "polycom",
-        "yealink",
-        "grandstream",
-    ) or 5060 in open_ports:
-        return "voip-phone", 0.78
-
-    if open_ports & {515, 631, 9100}:
-        return "printer", 0.9
-    if _contains(
-        evidence,
-        "printer",
-        "laserjet",
-        "brother",
-        "canon",
-        "epson",
-        "xerox",
-        "jetdirect",
-    ):
-        return "printer", 0.88
-
-    if 554 in open_ports or "rtsp" in service_names or "webcam" in evidence:
-        return "camera", 0.82
-    if _contains(evidence, "hikvision", "dahua", "axis", "ip camera", "nvr", "dvr"):
-        return "camera", 0.86
-
-    if open_ports & {111, 548, 873, 2049, 5000, 5001} or _contains(
-        evidence, "synology", "qnap", "truenas", "freenas", "nas", "storage"
-    ):
-        return "nas", 0.82
-
-    if open_ports & {88, 389, 636, 3268, 3269} and 445 in open_ports:
+    tcp_ports = {port for protocol, port in open_ports if protocol == "tcp"}
+    if tcp_ports & {88, 389, 636, 3268, 3269} and 445 in tcp_ports:
         return "domain-controller", 0.82
 
-    database_ports = open_ports & {1433, 1521, 27017, 3306, 5432, 6379}
-    if database_ports:
+    if tcp_ports & {1433, 1521, 27017, 3306, 5432, 6379}:
         return "database-server", 0.78
-
-    if 161 in open_ports or _contains(evidence, "snmp", "enterprise oid"):
-        return "network-device", 0.7
-
-    if open_ports & {22, 25, 53, 80, 443, 445, 8080, 8443}:
-        return "server", 0.7
-    if "windows" in os_name or "linux" in os_name or "mac os" in os_name:
-        return "workstation", 0.6
-    return "unknown", 0.25
+    if 9100 in tcp_ports:
+        return "printer", 0.7
+    return "unknown", 0.0
 
 
 def classify_discovered_device(device: dict[str, Any]) -> tuple[str, float]:
@@ -132,7 +155,11 @@ def classify_discovered_device(device: dict[str, Any]) -> tuple[str, float]:
 
 
 def exposure_flags(ports: list[dict[str, Any]]) -> list[dict[str, str]]:
-    open_ports = {item["port"] for item in ports if item["state"] == "open"}
+    open_ports = {
+        item["port"]
+        for item in ports
+        if item["state"] == "open" and item.get("protocol", "tcp") == "tcp"
+    }
     open_udp_ports = {
         item["port"]
         for item in ports
@@ -190,32 +217,21 @@ def _evidence_text(
 ) -> str:
     values: list[str] = []
     port_keys = (
-        "service",
         "product",
-        "version",
-        "extrainfo",
         "ostype",
         "devicetype",
-        "method",
         "cpe",
     )
     for item in ports:
+        if item.get("state") != "open":
+            continue
         values.extend(str(item.get(key) or "") for key in port_keys)
         values.extend(str(cpe or "") for cpe in item.get("cpes") or [])
     for item in os_matches:
-        values.append(str(item.get("name") or ""))
+        if item.get("accuracy", 0) >= 85:
+            values.append(str(item.get("name") or ""))
     if identity:
-        values.extend(
-            str(identity.get(key) or "")
-            for key in (
-                "hostname",
-                "vendor",
-                "snmp_name",
-                "snmp_description",
-                "snmp_object_id",
-                "device_type",
-            )
-        )
+        values.append(str(identity.get("snmp_description") or ""))
     return " ".join(value for value in values if value).lower()
 
 

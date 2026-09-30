@@ -3,6 +3,7 @@
   "release_scope": "v1_full_suite",
   "customer_id": "",
   "release_sha256": "",
+  "release_commit": "",
   "gates": {
     "automated_checks": { "status": "not_tested", "evidence": "" },
     "production_control_plane": { "status": "not_tested", "evidence": "" },

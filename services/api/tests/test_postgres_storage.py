@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -19,6 +20,12 @@ from forgesec_api.migrate_json import import_json
 from forgesec_api.postgres_storage import PostgresStore
 from forgesec_api.settings import Settings
 from forgesec_api.storage import JsonStore
+
+
+def test_pool_checks_connections_before_reuse(tmp_path: Path) -> None:
+    with patch("forgesec_api.postgres_storage.ConnectionPool") as pool:
+        PostgresStore(tmp_path, "postgresql://example")
+    assert pool.call_args.kwargs["check"] is pool.check_connection
 
 
 def test_postgres_import_and_transactions(tmp_path: Path) -> None:
@@ -110,7 +117,12 @@ def test_postgres_import_and_transactions(tmp_path: Path) -> None:
             scope = client.post(
                 f"/api/sites/{site['site_id']}/scopes",
                 headers=csrf,
-                json={"cidr": "10.50.0.0/24", "label": "QA LAN"},
+                json={
+                    "cidr": "10.50.0.0/24", "label": "QA LAN",
+                    "owner": "QA network owner", "approval_reference": "QA-001",
+                    "approved_by": "QA approver", "expires_on": "2099-12-31",
+                    "authorization_confirmed": True,
+                },
             )
             assert scope.status_code == 201
             worker = client.post(

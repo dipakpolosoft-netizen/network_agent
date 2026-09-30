@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from approval_payload import approved_scope
 from fastapi.testclient import TestClient
 
 from forgesec_api.main import create_app
@@ -15,12 +18,11 @@ def setup_site(client: TestClient, name: str, cidr: str) -> str:
     site = client.post("/api/sites", json={"name": name}).json()
     scope = client.post(
         f"/api/sites/{site['site_id']}/scopes",
-        json={
-            "cidr": cidr,
-            "label": "Approved LAN",
-            "exclusions": [cidr.replace("0/24", "99/32")],
-            "scan_profiles": ["inventory", "network_services"],
-        },
+        json=approved_scope(
+            cidr, "Approved LAN",
+            exclusions=[cidr.replace("0/24", "99/32")],
+            scan_profiles=["inventory", "network_services"],
+        ),
     )
     assert scope.status_code == 201
     return site["site_id"]
@@ -54,6 +56,45 @@ def heartbeat(client: TestClient, worker: dict) -> None:
     assert response.json()["status"] == "online"
 
 
+def test_expired_scope_blocks_central_worker_queue_and_lease(
+    client: TestClient,
+) -> None:
+    site_id = setup_site(client, "Expiry site", "10.28.0.0/24")
+    worker = provision(client, site_id)
+    heartbeat(client, worker)
+    service = client.app.state.worker_service
+    first = service.enqueue(
+        site_id=site_id,
+        capability="network_inventory",
+        target_ip="10.28.0.10",
+        profile="inventory",
+    )
+    headers = {"Authorization": f"Bearer {worker['credential']}"}
+    claimed = client.get("/worker/jobs/next", headers=headers)
+    assert claimed.status_code == 200
+    second = service.enqueue(
+        site_id=site_id,
+        capability="network_inventory",
+        target_ip="10.28.0.11",
+        profile="inventory",
+    )
+    scope_id = client.get(f"/api/sites/{site_id}/scopes").json()[0]["scope_id"]
+    scope = service.store.read("approved-scopes", scope_id)
+    assert scope is not None
+    scope["expires_on"] = (datetime.now(UTC).date() - timedelta(days=1)).isoformat()
+    service.store.write("approved-scopes", scope_id, scope)
+
+    assert client.get("/worker/jobs/next", headers=headers).status_code == 204
+    assert client.post(
+        f"/worker/jobs/{first['job_id']}/heartbeat",
+        headers=headers,
+        json={"lease_id": claimed.json()["lease_id"]},
+    ).status_code == 409
+    assert client.get("/worker/jobs/next", headers=headers).status_code == 204
+    pending = service.store.read("scanner-worker-jobs", second["job_id"])
+    assert pending["status"] == "cancelled"
+
+
 def test_worker_contract_scope_lease_result_and_revoke(
     client: TestClient, settings: Settings
 ) -> None:
@@ -67,8 +108,12 @@ def test_worker_contract_scope_lease_result_and_revoke(
     persisted = list((settings.runtime_data_dir / "scanner-workers").glob("*.json"))
     assert persisted
     assert all(credential not in path.read_text(encoding="utf-8") for path in persisted)
-    assert client.get("/worker/jobs/next").status_code == 401
-    assert client.get("/worker/jobs/next", headers=headers).status_code == 204
+    missing_credential = client.get("/worker/jobs/next")
+    assert missing_credential.status_code == 401
+    assert missing_credential.headers["cache-control"] == "private, no-store"
+    no_job = client.get("/worker/jobs/next", headers=headers)
+    assert no_job.status_code == 204
+    assert no_job.headers["cache-control"] == "private, no-store"
     assert (
         client.post(
             "/worker/heartbeat",
@@ -107,6 +152,7 @@ def test_worker_contract_scope_lease_result_and_revoke(
     )
     claim = client.get("/worker/jobs/next", headers=headers)
     assert claim.status_code == 200
+    assert claim.headers["cache-control"] == "private, no-store"
     assert claim.json()["job_id"] == job["job_id"]
     assert claim.json()["target_ip"] == "10.24.0.10"
     assert client.get("/worker/jobs/next", headers=headers).status_code == 204
@@ -147,6 +193,20 @@ def test_worker_contract_scope_lease_result_and_revoke(
             json=result,
         ).status_code
         == 409
+    )
+    events = [
+        json.loads(line)
+        for line in (settings.runtime_data_dir / "activity" / "activity.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert any(
+        event["event_type"] == "security.request_denied"
+        and event["actor_type"] == "scanner_worker"
+        and event["actor_id"] == other_worker["worker_id"]
+        and event["details"]["status"] == 409
+        and other_worker["credential"] not in json.dumps(event)
+        for event in events
     )
     completed = client.post(
         f"/worker/jobs/{job['job_id']}/result", headers=headers, json=result

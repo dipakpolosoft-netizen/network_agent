@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import os
+import stat
 import sys
 from dataclasses import replace
-from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -17,6 +18,8 @@ from forgesec_api.workers.runtime_client import WorkerLeaseLost, WorkerRuntimeEr
 from forgesec_api.workers.ssh_inventory_runtime import (
     PACKAGE_COMMAND,
     SshInventorySettings,
+    _command,
+    _packages,
     _target,
     open_ssh,
     run_inventory,
@@ -133,9 +136,24 @@ def test_inventory_requires_scope_and_observed_ssh_and_validates_evidence(
         ).status_code
         == 409
     )
-    assert client.post(result_path, headers=headers, json=result).status_code == 200
+    multiversion = {
+        **result["evidence"],
+        "packages": [
+            {"name": "kernel.x86_64", "version": "1.0"},
+            {"name": "kernel.x86_64", "version": "2.0"},
+        ],
+    }
+    assert (
+        client.post(
+            result_path, headers=headers, json={**result, "evidence": multiversion}
+        ).status_code
+        == 200
+    )
     detail = client.get(f"/api/worker-jobs/{job['job_id']}").json()
-    assert detail["evidence"]["packages"][0]["name"] == "openssh-server"
+    assert [item["version"] for item in detail["evidence"]["packages"]] == [
+        "1.0",
+        "2.0",
+    ]
     assert "evidence" not in client.get("/api/worker-jobs").json()[0]
 
 
@@ -215,21 +233,34 @@ def test_inventory_cancel_revokes_lease_and_source_change_blocks_claim(
 
 
 class _Channel:
-    def __init__(self, status: int = 0):
+    def __init__(self, output: bytes, error: bytes = b"", status: int = 0):
+        self.output = output
+        self.error = error
         self.status = status
         self.closed = False
+
+    def recv_ready(self) -> bool:
+        return bool(self.output)
+
+    def recv(self, size: int) -> bytes:
+        chunk, self.output = self.output[:size], self.output[size:]
+        return chunk
+
+    def recv_stderr_ready(self) -> bool:
+        return bool(self.error)
+
+    def recv_stderr(self, size: int) -> bytes:
+        chunk, self.error = self.error[:size], self.error[size:]
+        return chunk
+
+    def exit_status_ready(self) -> bool:
+        return not self.output and not self.error
 
     def recv_exit_status(self) -> int:
         return self.status
 
     def close(self) -> None:
         self.closed = True
-
-
-class _Output(BytesIO):
-    def __init__(self, value: bytes, status: int = 0):
-        super().__init__(value)
-        self.channel = _Channel(status)
 
 
 class _Ssh:
@@ -249,7 +280,9 @@ class _Ssh:
             "hostname": b"linux-test\n",
             PACKAGE_COMMAND: b"dpkg\nopenssh-server\t9.2p1\n",
         }[command]
-        return None, _Output(value), _Output(b"")
+        channel = _Channel(value)
+        output = SimpleNamespace(channel=channel)
+        return None, output, output
 
     def close(self) -> None:
         self.closed = True
@@ -272,10 +305,11 @@ def _job() -> dict:
 def test_ssh_inventory_runs_fixed_read_only_commands_and_closes() -> None:
     fake = _Ssh()
     settings = SshInventorySettings("scan", Path("key"), Path("known_hosts"))
+    phases = []
     evidence = run_inventory(
         _job(),
         settings,
-        on_tick=lambda _progress, _phase: None,
+        on_tick=lambda progress, phase: phases.append((progress, phase)),
         ssh_factory=lambda _settings, _target: fake,
     )
     assert evidence["packages"][0] == {"name": "openssh-server", "version": "9.2p1"}
@@ -288,6 +322,7 @@ def test_ssh_inventory_runs_fixed_read_only_commands_and_closes() -> None:
         PACKAGE_COMMAND,
     ]
     assert fake.closed
+    assert (55, "Reading host") in phases
 
 
 def test_ssh_inventory_closes_when_lease_is_lost() -> None:
@@ -305,11 +340,141 @@ def test_ssh_inventory_closes_when_lease_is_lost() -> None:
     assert fake.closed
 
 
+def test_ssh_inventory_checks_lease_between_kernel_and_hostname() -> None:
+    fake = _Ssh()
+    with pytest.raises(WorkerLeaseLost):
+        run_inventory(
+            _job(),
+            SshInventorySettings("scan", Path("key"), Path("known_hosts")),
+            on_tick=lambda progress, _phase: (
+                None if progress < 55 else (_ for _ in ()).throw(WorkerLeaseLost())
+            ),
+            ssh_factory=lambda _settings, _target: fake,
+        )
+    assert fake.commands == ["cat /etc/os-release", "uname -srm"]
+    assert fake.closed
+
+
+def test_ssh_inventory_checks_lease_before_connecting() -> None:
+    connections = []
+    with pytest.raises(WorkerLeaseLost):
+        run_inventory(
+            _job(),
+            SshInventorySettings("scan", Path("key"), Path("known_hosts")),
+            on_tick=lambda _progress, _phase: (_ for _ in ()).throw(WorkerLeaseLost()),
+            ssh_factory=lambda *_args: connections.append(True),
+        )
+    assert connections == []
+
+
 def test_ssh_inventory_rejects_wrong_claim_and_no_extra_fields() -> None:
     with pytest.raises(WorkerRuntimeError):
         _target({**_job(), "target_ip": "not-an-ip"})
     with pytest.raises(WorkerRuntimeError):
         _target({**_job(), "capability": "greenbone_assessment"})
+    with pytest.raises(WorkerRuntimeError):
+        _target({**_job(), "target_scheme": "http"})
+
+
+def test_empty_hostname_fails_inventory_and_closes_connection() -> None:
+    class NoHostnameSsh(_Ssh):
+        def exec_command(self, command: str, **kwargs):
+            if command == "hostname":
+                stream = SimpleNamespace(channel=_Channel(b""))
+                return None, stream, stream
+            return super().exec_command(command, **kwargs)
+
+    fake = NoHostnameSsh()
+    with pytest.raises(WorkerRuntimeError, match="did not report a hostname"):
+        run_inventory(
+            _job(),
+            SshInventorySettings("scan", Path("key"), Path("known_hosts")),
+            on_tick=lambda _progress, _phase: None,
+            ssh_factory=lambda _settings, _target: fake,
+        )
+    assert fake.closed
+
+
+@pytest.mark.parametrize("release", [b"", b'PRETTY_NAME="broken\n'])
+def test_missing_or_malformed_os_release_is_not_invented(release: bytes) -> None:
+    class NoReleaseSsh(_Ssh):
+        def exec_command(self, command: str, **kwargs):
+            if command == "cat /etc/os-release":
+                stream = SimpleNamespace(channel=_Channel(release))
+                return None, stream, stream
+            return super().exec_command(command, **kwargs)
+
+    fake = NoReleaseSsh()
+    with pytest.raises(WorkerRuntimeError, match="did not report an OS release"):
+        run_inventory(
+            _job(),
+            SshInventorySettings("scan", Path("key"), Path("known_hosts")),
+            on_tick=lambda _progress, _phase: None,
+            ssh_factory=lambda _settings, _target: fake,
+        )
+    assert fake.closed
+
+
+def test_ssh_command_drains_both_streams_and_checks_exit_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CommandSsh:
+        def __init__(self, output: bytes, error: bytes, status: int):
+            self.channel = _Channel(output, error, status)
+
+        def exec_command(self, command, **kwargs):
+            stream = SimpleNamespace(channel=self.channel)
+            return None, stream, stream
+
+    failed = CommandSsh(b"dpkg\n", b"query failed", 1)
+    with pytest.raises(WorkerRuntimeError, match="command failed"):
+        _command(failed, PACKAGE_COMMAND)
+    assert failed.channel.closed
+
+    too_much_error = CommandSsh(b"", b"x" * 4097, 0)
+    with pytest.raises(WorkerRuntimeError, match="error output exceeded"):
+        _command(too_much_error, PACKAGE_COMMAND)
+    assert too_much_error.channel.closed
+
+    too_much_output = CommandSsh(b"x" * (80 * 1024 + 1), b"", 0)
+    with pytest.raises(WorkerRuntimeError, match="output exceeded"):
+        _command(too_much_output, PACKAGE_COMMAND)
+    assert too_much_output.channel.closed
+
+    invalid_utf8 = CommandSsh(b"\xff", b"", 0)
+    with pytest.raises(WorkerRuntimeError, match="not valid UTF-8"):
+        _command(invalid_utf8, "cat /etc/os-release")
+    assert invalid_utf8.channel.closed
+
+    timed_out = CommandSsh(b"", b"", 0)
+    timed_out.channel.exit_status_ready = lambda: False
+    times = iter([0.0, 16.0])
+    monkeypatch.setattr(
+        "forgesec_api.workers.ssh_inventory_runtime.time.monotonic",
+        lambda: next(times),
+    )
+    with pytest.raises(WorkerRuntimeError, match="timed out"):
+        _command(timed_out, PACKAGE_COMMAND)
+    assert timed_out.channel.closed
+
+
+def test_package_query_failures_and_multiversion_rows_are_explicit() -> None:
+    assert "data=$(LC_ALL=C dpkg-query" in PACKAGE_COMMAND
+    assert "2>/dev/null) || exit 1" in PACKAGE_COMMAND
+    assert "data=$(LC_ALL=C rpm" in PACKAGE_COMMAND
+    assert "%{NAME}.%{ARCH}" in PACKAGE_COMMAND
+    assert _packages("rpm\nkernel.x86_64\t1.0\nkernel.x86_64\t2.0\n") == (
+        "rpm",
+        [
+            {"name": "kernel.x86_64", "version": "1.0"},
+            {"name": "kernel.x86_64", "version": "2.0"},
+        ],
+        False,
+    )
+    with pytest.raises(WorkerRuntimeError, match="no installed packages"):
+        _packages("dpkg\n")
+    with pytest.raises(WorkerRuntimeError, match="malformed"):
+        _packages("dpkg\nbad-row\n")
 
 
 def test_ssh_connection_pins_host_key_and_disables_fallback(monkeypatch) -> None:
@@ -344,3 +509,71 @@ def test_ssh_connection_pins_host_key_and_disables_fallback(monkeypatch) -> None
     assert calls["connect"]["port"] == 22
     assert calls["connect"]["look_for_keys"] is False
     assert calls["connect"]["allow_agent"] is False
+
+
+def test_ssh_connection_closes_after_host_key_rejection(monkeypatch) -> None:
+    closed = []
+
+    class FakeClient:
+        def load_host_keys(self, path):
+            pass
+
+        def set_missing_host_key_policy(self, policy):
+            pass
+
+        def connect(self, **kwargs):
+            raise OSError("host key changed")
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "paramiko",
+        SimpleNamespace(
+            SSHClient=FakeClient,
+            RejectPolicy=type("RejectPolicy", (), {}),
+        ),
+    )
+    with pytest.raises(OSError, match="host key changed"):
+        open_ssh(
+            SshInventorySettings("scan", Path("key"), Path("known_hosts")),
+            "192.168.1.10",
+        )
+    assert closed == [True]
+
+
+def test_ssh_settings_require_safe_host_keys_and_non_root_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = tmp_path / "inventory.key"
+    known_hosts = tmp_path / "known_hosts"
+    key.write_text("test", encoding="utf-8")
+    known_hosts.write_text("test", encoding="utf-8")
+    key = key.resolve()
+    known_hosts = known_hosts.resolve()
+    monkeypatch.setenv("FORGESEC_SSH_INVENTORY_KEY_FILE", str(key))
+    monkeypatch.setenv("FORGESEC_SSH_INVENTORY_KNOWN_HOSTS", str(known_hosts))
+    monkeypatch.setenv("FORGESEC_SSH_INVENTORY_USERNAME", "inventory")
+    modes = {key: 0o600, known_hosts: 0o666}
+    real_stat = Path.stat
+
+    def file_stat(path: Path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if path not in modes:
+            return result
+        return os.stat_result((stat.S_IFREG | modes[path], *result[1:]))
+
+    monkeypatch.setattr(Path, "stat", file_stat)
+    with pytest.raises(WorkerRuntimeError, match="known_hosts"):
+        SshInventorySettings.from_env()
+
+    modes[known_hosts] = 0o644
+    monkeypatch.setenv("FORGESEC_SSH_INVENTORY_USERNAME", "root")
+    with pytest.raises(WorkerRuntimeError, match="username"):
+        SshInventorySettings.from_env()
+
+    monkeypatch.setenv("FORGESEC_SSH_INVENTORY_USERNAME", "inventory")
+    settings = SshInventorySettings.from_env()
+    assert settings.key_path == key
+    assert settings.known_hosts_path == known_hosts

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
 from test_enrollment_flow import enroll_agent
 
+from forgesec_api.auth.service import SESSION_COOKIE
 from forgesec_api.main import create_app
 from forgesec_api.settings import Settings
 
@@ -34,7 +37,9 @@ def test_login_session_csrf_and_roles(settings: Settings) -> None:
     with TestClient(app) as client:
         auth = app.state.auth_service
         auth.create_user("admin@example.test", "correct horse battery", "admin")
-        assert client.get("/api/sites").status_code == 401
+        signed_out = client.get("/api/sites")
+        assert signed_out.status_code == 401
+        assert signed_out.headers["cache-control"] == "private, no-store"
         assert client.get("/health").status_code == 200
         _, probe_token = app.state.enrollment_service.create(
             label="QA Probe", site_name="QA Site"
@@ -52,7 +57,9 @@ def test_login_session_csrf_and_roles(settings: Settings) -> None:
         assert client.get("/api/auth/me").json()["csrf_token"] == csrf
         assert client.get("/api/sites").headers["cache-control"] == "private, no-store"
         assert client.get("/api/auth/users").json()[0]["email"] == "admin@example.test"
-        assert client.post("/api/sites", json={"name": "Protected"}).status_code == 403
+        denied = client.post("/api/sites", json={"name": "Protected"})
+        assert denied.status_code == 403
+        assert denied.headers["cache-control"] == "private, no-store"
         assert (
             client.post(
                 "/api/sites",
@@ -156,6 +163,83 @@ def test_operator_cannot_manage_site_or_enrollment(settings: Settings) -> None:
             ).status_code
             == 403
         )
+        events = [
+            json.loads(line)
+            for line in (settings.runtime_data_dir / "activity" / "activity.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        denials = [
+            event
+            for event in events
+            if event["event_type"] == "security.request_denied"
+        ]
+        assert len(denials) == 2
+        assert {event["details"]["route"] for event in denials} == {
+            "/api/sites",
+            "/api/enrollments",
+        }
+        assert all(event["actor_type"] == "user" for event in denials)
+        assert csrf not in json.dumps(denials)
+        assert client.get("/api/sites").json() == []
+        assert app.state.store.list("enrollments") == []
+
+
+def test_denial_audit_does_not_store_untrusted_path_segment(
+    client: TestClient, settings: Settings
+) -> None:
+    marker = "sensitive-path-segment"
+    response = client.get(f"/api/sites/{marker}/scopes")
+    assert response.status_code == 422
+    events = [
+        json.loads(line)
+        for line in (settings.runtime_data_dir / "activity" / "activity.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    denials = [
+        event for event in events if event["event_type"] == "security.request_denied"
+    ]
+    assert len(denials) == 1
+    assert denials[0]["details"]["route"] == "/api/sites/{site_id}/scopes"
+    assert marker not in json.dumps(denials[0])
+
+
+def test_expired_operator_session_is_rejected_and_audited_once(
+    settings: Settings,
+) -> None:
+    app = create_app(replace(settings, auth_required=True))
+    with TestClient(app) as client:
+        user = app.state.auth_service.create_user(
+            "viewer@example.test", "long test password here", "viewer"
+        )
+        assert client.post(
+            "/api/auth/login",
+            json={
+                "email": "viewer@example.test",
+                "password": "long test password here",
+            },
+        ).status_code == 200
+        token = client.cookies.get(SESSION_COOKIE)
+        key = hashlib.sha256(token.encode()).hexdigest()
+        session = app.state.store.read("sessions", key)
+        session["expires_at"] = "2020-01-01T00:00:00Z"
+        app.state.store.write("sessions", key, session)
+        assert client.get("/api/scans").status_code == 401
+        assert client.get("/api/scans").status_code == 401
+        events = [
+            json.loads(line)
+            for line in (settings.runtime_data_dir / "activity" / "activity.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        expired = [
+            event for event in events
+            if event["event_type"] == "user.session_expired"
+        ]
+        assert len(expired) == 1
+        assert expired[0]["actor_id"] == user["user_id"]
+        assert token not in json.dumps(expired[0])
 
 
 def test_failed_login_is_rate_limited(settings: Settings) -> None:

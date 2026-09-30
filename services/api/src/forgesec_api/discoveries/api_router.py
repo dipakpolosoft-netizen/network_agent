@@ -56,6 +56,7 @@ def create_discovery(
             requested_scope=payload.scope,
             mode=payload.mode,
             authorization_confirmed=payload.authorization_confirmed,
+            known_targets=payload.known_targets,
         )
     except DiscoveryNotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found") from exc

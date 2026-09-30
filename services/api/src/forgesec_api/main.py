@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from forgesec_api import __version__
+from forgesec_api.activity import record_activity
 from forgesec_api.agents.agent_router import router as agent_protocol_router
 from forgesec_api.agents.api_router import router as agents_router
 from forgesec_api.agents.service import AgentService
@@ -189,7 +190,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if mutation:
             if (
                 path in {"/api/worker-jobs/greenbone", "/api/worker-jobs/inventory"}
-                or (path.startswith("/api/worker-jobs/") and path.endswith("/cancel"))
             ) and user["role"] != "admin":
                 return JSONResponse(
                     {"detail": "Administrator access required"}, status_code=403
@@ -216,6 +216,59 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
         return await no_store_response()
 
+    @app.middleware("http")
+    async def audit_policy_denials(request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path.startswith(("/api/", "/agent/", "/worker/")):
+            response.headers["Cache-Control"] = "private, no-store"
+        families = (
+            "/api/agents",
+            "/api/discoveries",
+            "/api/scans",
+            "/api/sites",
+            "/api/enrollments",
+            "/api/auth/users",
+            "/api/worker-jobs",
+            "/api/workers",
+            "/agent",
+            "/worker",
+        )
+        family = next(
+            (item for item in families if path == item or path.startswith(item + "/")),
+            None,
+        )
+        if family and response.status_code in {403, 409, 410, 422}:
+            route = request.scope.get("route")
+            pattern = getattr(route, "path", None) or family
+            user = getattr(request.state, "user", None)
+            agent_id = getattr(request.state, "agent_id", None)
+            worker_id = getattr(request.state, "worker_id", None)
+            actor_type = (
+                "user"
+                if user
+                else "agent"
+                if agent_id
+                else "scanner_worker"
+                if worker_id
+                else "server"
+            )
+            record_activity(
+                store,
+                event_type="security.request_denied",
+                message="Security-sensitive request rejected",
+                actor_type=actor_type,
+                actor_id=(user["user_id"] if user else agent_id or worker_id),
+                severity="warning",
+                resource_type="api_route",
+                details={
+                    "method": request.method,
+                    "route": pattern,
+                    "status": response.status_code,
+                },
+            )
+        return response
+
     app.include_router(auth_router)
     app.include_router(enrollments_router)
     app.include_router(sites_router)
@@ -240,6 +293,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             environment=resolved_settings.environment,
             server_time=utc_now(),
         )
+
+    @app.get("/ready", include_in_schema=False)
+    def ready() -> JSONResponse:
+        try:
+            binding = store.read("deployment", "customer")
+            if resolved_settings.environment == "production" and (
+                not binding
+                or binding.get("customer_id") != resolved_settings.customer_id
+            ):
+                return JSONResponse(
+                    {"status": "unavailable"},
+                    status_code=503,
+                    headers={"Cache-Control": "no-store"},
+                )
+        except Exception:
+            return JSONResponse(
+                {"status": "unavailable"},
+                status_code=503,
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse({"status": "ready"}, headers={"Cache-Control": "no-store"})
 
     return app
 

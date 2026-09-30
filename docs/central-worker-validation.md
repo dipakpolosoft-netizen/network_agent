@@ -25,7 +25,8 @@ python -m forgesec_api.workers.check_runtime --worker greenbone
 python -m forgesec_api.workers.check_runtime --worker ssh
 ```
 
-`--offline` skips the read-only `GET /health` check while preparing a host. The preflight validates the API origin and worker ID without sending the credential, confirms the Nuclei binary/template or the Greenbone socket/client or the SSH key/known-hosts/client, and checks API TLS reachability. It does **not** authenticate the worker, test a target route, start an engine, or claim a job. A pass is readiness to attempt a controlled pilot, not evidence of a completed assessment.
+`--offline` skips the read-only `GET /health` check while preparing a host. The preflight validates the API origin and worker ID without sending the credential, invokes the configured Nuclei binary with `-version` (no target), checks the bundled template or the Greenbone socket/client or the SSH key/known-hosts/client, and checks API TLS reachability. It does **not** authenticate the worker, test a target route, run a scan, or claim a job. A pass is readiness to attempt a controlled pilot, not evidence of a completed assessment.
+The Nuclei worker repeats the version check at startup. Both invocations run with the worker credential removed from the child environment.
 
 For Step 30 production deployment, run the online preflight from each actual worker host against the customer-specific HTTPS origin. A remote API reporting `development` is rejected. Install and audit the selected worker dependencies on that host; the optional Greenbone and SSH extras are not yet represented by a hashed production lockfile. Record the worker-host OS, Python/engine versions, API origin, site and capability, certificate trust, and direct route to the approved target **without** putting credentials or target secrets in a release log. Do not mark a worker deployed solely because an identity was created or this preflight passed.
 

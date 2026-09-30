@@ -148,10 +148,19 @@ def main() -> int:
         print("Docker Compose is not installed.", file=sys.stderr)
         return 2
     if result.returncode:
+        required = (
+            "FORGESEC_PUBLIC_HOST",
+            "FORGESEC_POSTGRES_PASSWORD",
+            "FORGESEC_DATABASE_URL",
+            "FORGESEC_CUSTOMER_ID",
+        )
+        named = [name for name in required if name in result.stderr]
         print(
-            "Docker Compose could not resolve production settings. Set "
-            "FORGESEC_PUBLIC_HOST, FORGESEC_POSTGRES_PASSWORD, and "
-            "FORGESEC_DATABASE_URL in .env.",
+            "Docker Compose could not resolve production settings. "
+            + (
+                "Check: " + ", ".join(named) + "."
+                if named else "Check .env and the Compose files."
+            ),
             file=sys.stderr,
         )
         return 2
